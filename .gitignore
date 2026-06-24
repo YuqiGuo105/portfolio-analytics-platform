@@ -1,0 +1,43 @@
+# Maven
+target/
+*.jar
+*.war
+*.class
+dependency-reduced-pom.xml
+
+# IDE
+.idea/
+*.iml
+*.ipr
+*.iws
+.vscode/
+.project
+.classpath
+.settings/
+out/
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Local env / secrets — NEVER commit
+.env
+.env.local
+.env.*.local
+*.pem
+*.key
+**/secrets/
+
+# Coverage
+.jqwik-database
+jacoco.exec
+coverage/
+
+# Local data / volumes
+data/
+volumes/
+*.mmdb
+
+# Logs
+*.log
+logs/

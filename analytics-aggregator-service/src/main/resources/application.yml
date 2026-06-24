@@ -1,0 +1,58 @@
+spring:
+  application:
+    name: analytics-aggregator-service
+
+  datasource:
+    url: ${SPRING_DATASOURCE_URL:jdbc:postgresql://localhost:5432/postgres}
+    username: ${SPRING_DATASOURCE_USERNAME:postgres}
+    password: ${SPRING_DATASOURCE_PASSWORD:postgres}
+    hikari:
+      maximum-pool-size: 8
+      minimum-idle: 1
+      connection-timeout: 10000
+
+  flyway:
+    enabled: true
+    locations: classpath:db/migration
+    baseline-on-migrate: true
+    baseline-version: 0
+    validate-on-migrate: false
+
+  kafka:
+    bootstrap-servers: ${KAFKA_BROKERS:localhost:9092}
+    properties:
+      security.protocol: ${KAFKA_SECURITY_PROTOCOL:PLAINTEXT}
+      sasl.mechanism: ${KAFKA_SASL_MECHANISM:SCRAM-SHA-256}
+      sasl.jaas.config: org.apache.kafka.common.security.scram.ScramLoginModule required username="${KAFKA_USERNAME:}" password="${KAFKA_PASSWORD:}";
+      ssl.truststore.type: ${KAFKA_TRUSTSTORE_TYPE:PEM}
+      ssl.truststore.certificates: ${KAFKA_CA_CERT:}
+    consumer:
+      group-id: ${KAFKA_CONSUMER_GROUP:portfolio-analytics-aggregator}
+      auto-offset-reset: earliest
+      enable-auto-commit: false
+      key-deserializer: org.apache.kafka.common.serialization.StringDeserializer
+      value-deserializer: org.apache.kafka.common.serialization.StringDeserializer
+      properties:
+        max.poll.records: 100
+        session.timeout.ms: 30000
+    listener:
+      ack-mode: manual
+      missing-topics-fatal: false
+
+server:
+  port: ${PORT:8093}
+
+management:
+  endpoints:
+    web:
+      exposure:
+        include: health,info
+  endpoint:
+    health:
+      probes:
+        enabled: true
+
+analytics:
+  topics:
+    enriched: ${ANALYTICS_TOPIC_ENRICHED:analytics.enriched.events}
+  consumer-enabled: ${ANALYTICS_CONSUMER_ENABLED:true}

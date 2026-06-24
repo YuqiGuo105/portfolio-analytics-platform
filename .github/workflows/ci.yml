@@ -1,0 +1,46 @@
+name: ci
+
+on:
+  push:
+    branches: [ main ]
+  pull_request:
+    branches: [ main ]
+
+jobs:
+  build-test:
+    name: Build · Test · Coverage gate
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up JDK 21
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '21'
+          cache: maven
+
+      - name: Build, test, enforce 60% line coverage
+        run: mvn -B -ntp -Pcoverage verify
+
+  docker:
+    name: Build module images
+    needs: build-test
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        module:
+          - analytics-enrichment-service
+          - analytics-aggregator-service
+          - analytics-alerts-service
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Build ${{ matrix.module }} image
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: ${{ matrix.module }}/Dockerfile
+          push: false
+          tags: ${{ matrix.module }}:ci

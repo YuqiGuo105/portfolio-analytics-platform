@@ -1,0 +1,177 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<project xmlns="http://maven.apache.org/POM/4.0.0"
+         xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+         xsi:schemaLocation="http://maven.apache.org/POM/4.0.0
+                             http://maven.apache.org/xsd/maven-4.0.0.xsd">
+    <modelVersion>4.0.0</modelVersion>
+
+    <parent>
+        <groupId>org.springframework.boot</groupId>
+        <artifactId>spring-boot-starter-parent</artifactId>
+        <version>3.3.4</version>
+        <relativePath/>
+    </parent>
+
+    <groupId>site.yuqi</groupId>
+    <artifactId>portfolio-analytics-platform</artifactId>
+    <version>0.1.0</version>
+    <packaging>pom</packaging>
+    <name>portfolio-analytics-platform</name>
+    <description>
+        Visitor analytics + geo aggregation + alerting for the Portfolio platform.
+
+        Cheap-tier deployment target: Aiven Kafka Hobbyist (2 partitions/topic),
+        Aiven Valkey (event_id dedup + query cache), Supabase Postgres
+        (geo_areas + rollups + alert_rules + incidents). NO ClickHouse, NO S3
+        lake, NO Kafka Streams — the aggregator is a plain Spring Kafka
+        consumer doing UPSERTs into Postgres rollup tables at 5m and 1d
+        granularity only. This keeps the whole stack on the existing
+        free/cheap infra that already runs notification-service.
+
+        Modules (all Spring Boot 3.3 + Java 21, packaging=jar):
+          * analytics-common               — DTOs / enums / topics / DLQ helper
+          * analytics-enrichment-service   — raw → enriched (GeoIP, UA, ip_hash, snap-to-METRO)
+          * analytics-aggregator-service   — enriched → Postgres rollups (5m, 1d)
+          * analytics-alerts-service       — rule eval + incident mgmt + HTTP fan-out to notification-service
+
+        Privacy invariants enforced in code:
+          * raw IP is HMAC'd then discarded inside the enrichment stage; the
+            EnrichedEvent type has no `ipRaw` field.
+          * METRO is the smallest spatial bucket stored anywhere; raw
+            lat/lng do not survive enrichment.
+          * geo coordinates exposed to the dashboard always come from
+            `geo_areas.center_lat/lng`, never from a visitor row.
+    </description>
+
+    <modules>
+        <module>analytics-common</module>
+        <module>analytics-enrichment-service</module>
+        <module>analytics-aggregator-service</module>
+        <module>analytics-alerts-service</module>
+    </modules>
+
+    <properties>
+        <java.version>21</java.version>
+        <maven.compiler.release>21</maven.compiler.release>
+        <lombok.version>1.18.38</lombok.version>
+        <springdoc.version>2.6.0</springdoc.version>
+        <spring-kafka.version>3.2.4</spring-kafka.version>
+        <ua-parser.version>1.6.1</ua-parser.version>
+        <maxmind-geoip2.version>4.2.1</maxmind-geoip2.version>
+        <lettuce.version>6.3.2.RELEASE</lettuce.version>
+    </properties>
+
+    <dependencyManagement>
+        <dependencies>
+            <!-- Own modules -->
+            <dependency>
+                <groupId>site.yuqi</groupId>
+                <artifactId>analytics-common</artifactId>
+                <version>${project.version}</version>
+            </dependency>
+
+            <dependency>
+                <groupId>org.projectlombok</groupId>
+                <artifactId>lombok</artifactId>
+                <version>${lombok.version}</version>
+            </dependency>
+            <dependency>
+                <groupId>org.springdoc</groupId>
+                <artifactId>springdoc-openapi-starter-webmvc-ui</artifactId>
+                <version>${springdoc.version}</version>
+            </dependency>
+            <dependency>
+                <groupId>com.github.ua-parser</groupId>
+                <artifactId>uap-java</artifactId>
+                <version>${ua-parser.version}</version>
+            </dependency>
+            <dependency>
+                <groupId>com.maxmind.geoip2</groupId>
+                <artifactId>geoip2</artifactId>
+                <version>${maxmind-geoip2.version}</version>
+            </dependency>
+        </dependencies>
+    </dependencyManagement>
+
+    <build>
+        <pluginManagement>
+            <plugins>
+                <plugin>
+                    <groupId>org.apache.maven.plugins</groupId>
+                    <artifactId>maven-compiler-plugin</artifactId>
+                    <configuration>
+                        <release>21</release>
+                        <annotationProcessorPaths>
+                            <path>
+                                <groupId>org.projectlombok</groupId>
+                                <artifactId>lombok</artifactId>
+                                <version>${lombok.version}</version>
+                            </path>
+                        </annotationProcessorPaths>
+                    </configuration>
+                </plugin>
+            </plugins>
+        </pluginManagement>
+    </build>
+
+    <!-- ─── Coverage profile (-Pcoverage) ───────────────────────────────── -->
+    <!-- Mirrors portfolio-ai-platform: 60% line coverage gate on site/yuqi/**, -->
+    <!-- with the conventional excludes for non-logic classes. -->
+    <profiles>
+        <profile>
+            <id>coverage</id>
+            <build>
+                <plugins>
+                    <plugin>
+                        <groupId>org.jacoco</groupId>
+                        <artifactId>jacoco-maven-plugin</artifactId>
+                        <version>0.8.12</version>
+                        <configuration>
+                            <excludes>
+                                <!-- Spring Boot bootstrap classes have no business logic to test. -->
+                                <exclude>site/yuqi/analytics/**/*Application.class</exclude>
+                                <!-- Config beans are exercised at app startup, not in unit tests. -->
+                                <exclude>site/yuqi/analytics/**/config/**</exclude>
+                                <!-- Pure record DTOs (autogenerated accessors only). -->
+                                <exclude>site/yuqi/analytics/common/event/**</exclude>
+                                <exclude>site/yuqi/analytics/**/dto/**</exclude>
+                            </excludes>
+                        </configuration>
+                        <executions>
+                            <execution>
+                                <id>prepare-agent</id>
+                                <goals><goal>prepare-agent</goal></goals>
+                            </execution>
+                            <execution>
+                                <id>report</id>
+                                <phase>verify</phase>
+                                <goals><goal>report</goal></goals>
+                            </execution>
+                            <execution>
+                                <id>check</id>
+                                <goals><goal>check</goal></goals>
+                                <configuration>
+                                    <rules>
+                                        <rule>
+                                            <element>BUNDLE</element>
+                                            <limits>
+                                                <limit>
+                                                    <counter>LINE</counter>
+                                                    <value>COVEREDRATIO</value>
+                                                    <minimum>0.60</minimum>
+                                                </limit>
+                                            </limits>
+                                        </rule>
+                                    </rules>
+                                    <includes>
+                                        <include>site/yuqi/**</include>
+                                    </includes>
+                                </configuration>
+                            </execution>
+                        </executions>
+                    </plugin>
+                </plugins>
+            </build>
+        </profile>
+    </profiles>
+</project>
