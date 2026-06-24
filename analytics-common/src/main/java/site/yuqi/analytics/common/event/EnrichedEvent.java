@@ -5,8 +5,9 @@ import com.fasterxml.jackson.annotation.JsonInclude;
 import java.time.Instant;
 
 /**
- * Wire format on {@code analytics.enriched.events}. Consumed by the
- * aggregator (and any future downstream like the raw-event lake).
+ * In-process wire format produced by the aggregator's enrichment pipeline
+ * and consumed by {@code RollupUpsertService}. Used to be on its own
+ * Kafka topic before Aiven's free-tier 2-topic cap forced the merge.
  *
  * <p><b>Privacy invariants enforced by the type itself</b>:
  * <ul>

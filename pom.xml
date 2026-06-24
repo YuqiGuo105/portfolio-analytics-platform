@@ -20,22 +20,27 @@
     <description>
         Visitor analytics + geo aggregation + alerting for the Portfolio platform.
 
-        Cheap-tier deployment target: Aiven Kafka Hobbyist (2 partitions/topic),
-        Aiven Valkey (event_id dedup + query cache), Supabase Postgres
-        (geo_areas + rollups + alert_rules + incidents). NO ClickHouse, NO S3
-        lake, NO Kafka Streams — the aggregator is a plain Spring Kafka
-        consumer doing UPSERTs into Postgres rollup tables at 5m and 1d
-        granularity only. This keeps the whole stack on the existing
-        free/cheap infra that already runs notification-service.
+        Free-tier deployment target: Aiven Kafka free plan (2 topics max,
+        2 partitions each), Aiven Valkey free plan (event_id SETNX dedup),
+        Supabase Postgres free plan (geo_areas + rollups + alert_rules +
+        incidents). NO ClickHouse, NO S3 lake, NO Kafka Streams — a single
+        aggregator process owns the whole raw → enriched → rollup pipeline
+        and UPSERTs to Postgres rollup tables at 5m and 1d granularity.
 
         Modules (all Spring Boot 3.3 + Java 21, packaging=jar):
           * analytics-common               — DTOs / enums / topics / DLQ helper
-          * analytics-enrichment-service   — raw → enriched (GeoIP, UA, ip_hash, snap-to-METRO)
-          * analytics-aggregator-service   — enriched → Postgres rollups (5m, 1d)
-          * analytics-alerts-service       — rule eval + incident mgmt + HTTP fan-out to notification-service
+          * analytics-aggregator-service   — Kafka consumer (enrich + upsert),
+                                             backfill CLI, public read API
+                                             for the visitor globe
+          * analytics-alerts-service       — rule eval + incident mgmt + HTTP
+                                             fan-out to portfolio-notification-service
+
+        Topics (exactly 2, free tier):
+          * analytics.raw.events     — Ingestion API → aggregator
+          * analytics.events.dlq     — poison-pill records
 
         Privacy invariants enforced in code:
-          * raw IP is HMAC'd then discarded inside the enrichment stage; the
+          * raw IP is HMAC'd then discarded inside the aggregator; the
             EnrichedEvent type has no `ipRaw` field.
           * METRO is the smallest spatial bucket stored anywhere; raw
             lat/lng do not survive enrichment.
@@ -45,7 +50,6 @@
 
     <modules>
         <module>analytics-common</module>
-        <module>analytics-enrichment-service</module>
         <module>analytics-aggregator-service</module>
         <module>analytics-alerts-service</module>
     </modules>

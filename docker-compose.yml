@@ -1,35 +1,10 @@
-# Local dev compose. Three stateless Spring Boot apps; all of Kafka /
-# Valkey / Postgres are external (Aiven + Supabase) — drive via .env.
+# Local dev compose. Two stateless Spring Boot apps; Kafka / Valkey /
+# Postgres are external (Aiven + Supabase) — drive via .env.
 #
 # Do NOT bake any Aiven password into this file. Use ${VAR} interpolation
 # and require the operator to populate .env from .env.example.
 
 services:
-  analytics-enrichment-service:
-    build:
-      context: .
-      dockerfile: analytics-enrichment-service/Dockerfile
-    image: analytics-enrichment-service:local
-    container_name: analytics-enrichment-service
-    ports:
-      - "${ENRICHMENT_PORT:-8092}:8092"
-    environment:
-      - SPRING_PROFILES_ACTIVE=local
-      - PORT=8092
-      - KAFKA_BROKERS=${KAFKA_BROKERS:-}
-      - KAFKA_USERNAME=${KAFKA_USERNAME:-}
-      - KAFKA_PASSWORD=${KAFKA_PASSWORD:-}
-      - KAFKA_SECURITY_PROTOCOL=${KAFKA_SECURITY_PROTOCOL:-SASL_SSL}
-      - KAFKA_SASL_MECHANISM=${KAFKA_SASL_MECHANISM:-SCRAM-SHA-256}
-      - KAFKA_TRUSTSTORE_TYPE=${KAFKA_TRUSTSTORE_TYPE:-PEM}
-      - KAFKA_CA_CERT=${KAFKA_CA_CERT:-}
-      - ANALYTICS_TOPIC_RAW=${ANALYTICS_TOPIC_RAW:-analytics.raw.events}
-      - ANALYTICS_TOPIC_ENRICHED=${ANALYTICS_TOPIC_ENRICHED:-analytics.enriched.events}
-      - ANALYTICS_TOPIC_DLQ=${ANALYTICS_TOPIC_DLQ:-analytics.events.dlq}
-      - VALKEY_URL=${VALKEY_URL:-}
-      - ANALYTICS_HMAC_SALT=${ANALYTICS_HMAC_SALT:-}
-    restart: unless-stopped
-
   analytics-aggregator-service:
     build:
       context: .
@@ -48,10 +23,15 @@ services:
       - KAFKA_SASL_MECHANISM=${KAFKA_SASL_MECHANISM:-SCRAM-SHA-256}
       - KAFKA_TRUSTSTORE_TYPE=${KAFKA_TRUSTSTORE_TYPE:-PEM}
       - KAFKA_CA_CERT=${KAFKA_CA_CERT:-}
-      - ANALYTICS_TOPIC_ENRICHED=${ANALYTICS_TOPIC_ENRICHED:-analytics.enriched.events}
+      - ANALYTICS_TOPIC_RAW=${ANALYTICS_TOPIC_RAW:-analytics.raw.events}
+      - ANALYTICS_TOPIC_DLQ=${ANALYTICS_TOPIC_DLQ:-analytics.events.dlq}
+      - VALKEY_URL=${VALKEY_URL:-redis://host.docker.internal:6379}
       - SPRING_DATASOURCE_URL=${SPRING_DATASOURCE_URL:-jdbc:postgresql://host.docker.internal:5432/postgres}
       - SPRING_DATASOURCE_USERNAME=${SPRING_DATASOURCE_USERNAME:-postgres}
       - SPRING_DATASOURCE_PASSWORD=${SPRING_DATASOURCE_PASSWORD:-postgres}
+      - ANALYTICS_HMAC_SALT=${ANALYTICS_HMAC_SALT:-dev-salt-change-me}
+      - ANALYTICS_SITE_ID=${ANALYTICS_SITE_ID:-yuqi.site}
+      - ANALYTICS_BACKFILL_ENABLED=${ANALYTICS_BACKFILL_ENABLED:-false}
     restart: unless-stopped
 
   analytics-alerts-service:

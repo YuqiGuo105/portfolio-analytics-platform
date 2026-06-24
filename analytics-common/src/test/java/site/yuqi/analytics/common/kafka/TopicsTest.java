@@ -12,7 +12,6 @@ class TopicsTest {
         // consumer. Changing them is a breaking change — this test exists so
         // that's loud rather than silent.
         assertThat(Topics.RAW).isEqualTo("analytics.raw.events");
-        assertThat(Topics.ENRICHED).isEqualTo("analytics.enriched.events");
         assertThat(Topics.DLQ).isEqualTo("analytics.events.dlq");
     }
 }

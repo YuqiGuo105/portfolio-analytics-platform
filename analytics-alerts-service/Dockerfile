@@ -4,7 +4,6 @@ WORKDIR /workspace
 
 COPY pom.xml ./
 COPY analytics-common/pom.xml analytics-common/pom.xml
-COPY analytics-enrichment-service/pom.xml analytics-enrichment-service/pom.xml
 COPY analytics-aggregator-service/pom.xml analytics-aggregator-service/pom.xml
 COPY analytics-alerts-service/pom.xml analytics-alerts-service/pom.xml
 RUN mvn -B -q -pl analytics-common,analytics-alerts-service -am -DskipTests dependency:go-offline

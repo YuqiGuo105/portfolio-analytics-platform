@@ -2,6 +2,11 @@ spring:
   application:
     name: analytics-aggregator-service
 
+  data:
+    redis:
+      url: ${VALKEY_URL:redis://localhost:6379}
+      timeout: 2000
+
   datasource:
     url: ${SPRING_DATASOURCE_URL:jdbc:postgresql://localhost:5432/postgres}
     username: ${SPRING_DATASOURCE_USERNAME:postgres}
@@ -35,6 +40,11 @@ spring:
       properties:
         max.poll.records: 100
         session.timeout.ms: 30000
+    producer:
+      acks: all
+      retries: 5
+      key-serializer: org.apache.kafka.common.serialization.StringSerializer
+      value-serializer: org.apache.kafka.common.serialization.StringSerializer
     listener:
       ack-mode: manual
       missing-topics-fatal: false
@@ -52,7 +62,25 @@ management:
       probes:
         enabled: true
 
+springdoc:
+  api-docs:
+    path: /v3/api-docs
+  swagger-ui:
+    path: /swagger-ui.html
+
 analytics:
   topics:
-    enriched: ${ANALYTICS_TOPIC_ENRICHED:analytics.enriched.events}
+    raw: ${ANALYTICS_TOPIC_RAW:analytics.raw.events}
+    dlq: ${ANALYTICS_TOPIC_DLQ:analytics.events.dlq}
   consumer-enabled: ${ANALYTICS_CONSUMER_ENABLED:true}
+  hmac-salt: ${ANALYTICS_HMAC_SALT:change-me-please}
+  dedup:
+    ttl-seconds: ${ANALYTICS_DEDUP_TTL_SECONDS:86400}
+  backfill:
+    # When true on startup, BackfillRunner reads from the existing
+    # visitor_logs / visitor_clicks tables and replays them through the
+    # full enrich → upsert pipeline. Defaults to off so a normal boot
+    # never silently re-imports a million rows.
+    enabled: ${ANALYTICS_BACKFILL_ENABLED:false}
+    site-id: ${ANALYTICS_SITE_ID:yuqi.site}
+    batch-size: ${ANALYTICS_BACKFILL_BATCH:500}

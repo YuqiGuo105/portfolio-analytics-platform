@@ -1,0 +1,103 @@
+# Render.com Infrastructure-as-Code blueprint.
+#
+# Apply with: `render blueprint launch` from the repo root, or paste this
+# into Render Dashboard → Blueprints → New.
+#
+# Aiven Kafka / Aiven Valkey / Supabase Postgres are NOT created by this
+# blueprint — they live on their own free-tier providers. Their
+# credentials are wired in as Render env vars (mark them `sync: false`
+# so Render prompts the operator on first apply).
+#
+# Free tier reminder:
+#   - Web services on Render's free plan spin down after 15 min idle and
+#     cold-start in ~30s. Both services here are tagged accordingly.
+#   - The Kafka consumer survives cold starts because Aiven retains the
+#     topic offset; the listener resumes from the last committed offset
+#     on warm-up.
+
+services:
+  - type: web
+    name: portfolio-analytics-aggregator
+    runtime: docker
+    plan: free
+    region: oregon
+    branch: main
+    dockerfilePath: ./analytics-aggregator-service/Dockerfile
+    dockerContext: .
+    healthCheckPath: /actuator/health
+    envVars:
+      - key: PORT
+        value: 8093
+      - key: SPRING_PROFILES_ACTIVE
+        value: prod
+      # ---- Aiven Kafka (from Aiven console → Service overview) ----
+      - key: KAFKA_BROKERS
+        sync: false
+      - key: KAFKA_USERNAME
+        sync: false
+      - key: KAFKA_PASSWORD
+        sync: false
+      - key: KAFKA_SECURITY_PROTOCOL
+        value: SASL_SSL
+      - key: KAFKA_SASL_MECHANISM
+        value: SCRAM-SHA-256
+      - key: KAFKA_TRUSTSTORE_TYPE
+        value: PEM
+      - key: KAFKA_CA_CERT
+        sync: false
+      - key: ANALYTICS_TOPIC_RAW
+        value: analytics.raw.events
+      - key: ANALYTICS_TOPIC_DLQ
+        value: analytics.events.dlq
+      # ---- Aiven Valkey (rediss://default:PWD@host:port) ----
+      - key: VALKEY_URL
+        sync: false
+      # ---- Supabase Postgres ----
+      - key: SPRING_DATASOURCE_URL
+        sync: false
+      - key: SPRING_DATASOURCE_USERNAME
+        sync: false
+      - key: SPRING_DATASOURCE_PASSWORD
+        sync: false
+      # ---- Privacy salt; rotate to invalidate historical ip_hash joins ----
+      - key: ANALYTICS_HMAC_SALT
+        generateValue: true
+      - key: ANALYTICS_SITE_ID
+        value: yuqi.site
+      - key: ANALYTICS_DEDUP_TTL_SECONDS
+        value: 86400
+      - key: ANALYTICS_CONSUMER_ENABLED
+        value: true
+      # Set to true and trigger a manual deploy when you want to replay
+      # visitor_logs + visitor_clicks through the rollup pipeline. Flip
+      # back to false on the next deploy so the consumer doesn't sit
+      # idle while a backfill is running.
+      - key: ANALYTICS_BACKFILL_ENABLED
+        value: false
+
+  - type: web
+    name: portfolio-analytics-alerts
+    runtime: docker
+    plan: free
+    region: oregon
+    branch: main
+    dockerfilePath: ./analytics-alerts-service/Dockerfile
+    dockerContext: .
+    healthCheckPath: /actuator/health
+    envVars:
+      - key: PORT
+        value: 8094
+      - key: SPRING_PROFILES_ACTIVE
+        value: prod
+      - key: SPRING_DATASOURCE_URL
+        sync: false
+      - key: SPRING_DATASOURCE_USERNAME
+        sync: false
+      - key: SPRING_DATASOURCE_PASSWORD
+        sync: false
+      - key: INTERNAL_API_TOKEN
+        generateValue: true
+      - key: NOTIFICATION_INTERNAL_TOKEN
+        sync: false
+      - key: NOTIFICATION_SERVICE_BASE_URL
+        sync: false

@@ -15,10 +15,14 @@
     <artifactId>analytics-aggregator-service</artifactId>
     <packaging>jar</packaging>
     <name>analytics-aggregator-service</name>
-    <description>Consumes analytics.enriched.events and UPSERTs into the
-        Postgres geo_time_rollups table at 5m and 1d granularity. 1d rows
-        are derived from 5m by an in-process cascade — no Kafka Streams,
-        no ClickHouse, no batch job.</description>
+    <description>Single Kafka consumer that owns the whole raw → enriched →
+        rollup pipeline. Reads analytics.raw.events, enriches in-process
+        (UA classify, bot score, HMAC ip_hash, geo snap to METRO),
+        deduplicates via Aiven Valkey SETNX, then UPSERTs into the Postgres
+        geo_time_rollups table at 5m + 1d granularity. Also exposes
+        public read endpoints for the visitor globe and a /backfill
+        CommandLineRunner to import historical visitor_logs / visitor_clicks
+        from Supabase.</description>
 
     <dependencies>
         <dependency>
@@ -39,6 +43,10 @@
             <artifactId>spring-boot-starter-jdbc</artifactId>
         </dependency>
         <dependency>
+            <groupId>org.springframework.boot</groupId>
+            <artifactId>spring-boot-starter-data-redis</artifactId>
+        </dependency>
+        <dependency>
             <groupId>org.postgresql</groupId>
             <artifactId>postgresql</artifactId>
             <scope>runtime</scope>
@@ -55,6 +63,10 @@
             <groupId>org.springframework.kafka</groupId>
             <artifactId>spring-kafka</artifactId>
         </dependency>
+        <dependency>
+            <groupId>org.springdoc</groupId>
+            <artifactId>springdoc-openapi-starter-webmvc-ui</artifactId>
+        </dependency>
 
         <dependency>
             <groupId>org.projectlombok</groupId>
@@ -65,6 +77,11 @@
         <dependency>
             <groupId>org.springframework.boot</groupId>
             <artifactId>spring-boot-starter-test</artifactId>
+            <scope>test</scope>
+        </dependency>
+        <dependency>
+            <groupId>org.springframework.kafka</groupId>
+            <artifactId>spring-kafka-test</artifactId>
             <scope>test</scope>
         </dependency>
     </dependencies>
