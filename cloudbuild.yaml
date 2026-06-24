@@ -1,0 +1,66 @@
+# Cloud Build config for portfolio-analytics-platform.
+#
+# Usage:
+#   gcloud builds submit \
+#     --project=portfolio-notify-prod \
+#     --config=cloudbuild.yaml \
+#     --substitutions=_TAG=sha-$(git rev-parse --short HEAD)
+#
+# Builds both Spring Boot services from the multi-module root (so each
+# Dockerfile can COPY the parent pom.xml + sibling modules) and pushes
+# them to the existing Artifact Registry repo:
+#   us-central1-docker.pkg.dev/portfolio-notify-prod/portfolio/
+
+substitutions:
+  _TAG: latest
+  _AR_REPO: us-central1-docker.pkg.dev/portfolio-notify-prod/portfolio
+
+options:
+  machineType: E2_HIGHCPU_8
+  logging: CLOUD_LOGGING_ONLY
+
+steps:
+  # ───────────────── analytics-aggregator-service ─────────────────
+  - id: build-aggregator
+    name: gcr.io/cloud-builders/docker
+    args:
+      - build
+      - -t
+      - ${_AR_REPO}/portfolio-analytics-aggregator:${_TAG}
+      - -t
+      - ${_AR_REPO}/portfolio-analytics-aggregator:latest
+      - -f
+      - analytics-aggregator-service/Dockerfile
+      - .
+
+  - id: push-aggregator
+    name: gcr.io/cloud-builders/docker
+    args: [push, --all-tags, '${_AR_REPO}/portfolio-analytics-aggregator']
+    waitFor: [build-aggregator]
+
+  # ───────────────── analytics-alerts-service ─────────────────
+  - id: build-alerts
+    name: gcr.io/cloud-builders/docker
+    args:
+      - build
+      - -t
+      - ${_AR_REPO}/portfolio-analytics-alerts:${_TAG}
+      - -t
+      - ${_AR_REPO}/portfolio-analytics-alerts:latest
+      - -f
+      - analytics-alerts-service/Dockerfile
+      - .
+    waitFor: ['-']
+
+  - id: push-alerts
+    name: gcr.io/cloud-builders/docker
+    args: [push, --all-tags, '${_AR_REPO}/portfolio-analytics-alerts']
+    waitFor: [build-alerts]
+
+images:
+  - ${_AR_REPO}/portfolio-analytics-aggregator:${_TAG}
+  - ${_AR_REPO}/portfolio-analytics-aggregator:latest
+  - ${_AR_REPO}/portfolio-analytics-alerts:${_TAG}
+  - ${_AR_REPO}/portfolio-analytics-alerts:latest
+
+timeout: 1800s

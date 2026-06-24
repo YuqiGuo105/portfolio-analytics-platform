@@ -17,6 +17,9 @@ spring:
     baseline-on-migrate: true
     baseline-version: 0
     validate-on-migrate: false
+    # See aggregator-service for rationale: shared Supabase DB with
+    # portfolio-notification-service means we need our own history table.
+    table: analytics_alerts_flyway_history
 
 server:
   port: ${PORT:8094}

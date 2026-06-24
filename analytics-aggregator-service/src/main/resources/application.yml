@@ -22,6 +22,12 @@ spring:
     baseline-on-migrate: true
     baseline-version: 0
     validate-on-migrate: false
+    # Each analytics service owns its own history table because the Supabase
+    # database is shared with portfolio-notification-service (which uses the
+    # default public.flyway_schema_history). Without this, the aggregator's V1
+    # collides with notification-service's V1 and gets skipped, then V2/V3
+    # fail because the table they target was never created.
+    table: analytics_aggregator_flyway_history
 
   kafka:
     bootstrap-servers: ${KAFKA_BROKERS:localhost:9092}
@@ -29,6 +35,8 @@ spring:
       security.protocol: ${KAFKA_SECURITY_PROTOCOL:PLAINTEXT}
       sasl.mechanism: ${KAFKA_SASL_MECHANISM:SCRAM-SHA-256}
       sasl.jaas.config: org.apache.kafka.common.security.scram.ScramLoginModule required username="${KAFKA_USERNAME:}" password="${KAFKA_PASSWORD:}";
+      # Truststore is only used when security.protocol=SASL_SSL/SSL. In prod we
+      # always inject KAFKA_TRUSTSTORE_TYPE=PEM + KAFKA_CA_CERT via Cloud Run.
       ssl.truststore.type: ${KAFKA_TRUSTSTORE_TYPE:PEM}
       ssl.truststore.certificates: ${KAFKA_CA_CERT:}
     consumer:
