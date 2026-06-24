@@ -4,7 +4,6 @@ import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.jdbc.core.JdbcTemplate;
-import org.springframework.jdbc.core.ResultSetExtractor;
 import org.springframework.stereotype.Service;
 import site.yuqi.analytics.aggregator.enrich.EnrichmentPipeline;
 import site.yuqi.analytics.aggregator.service.RollupUpsertService;
@@ -16,7 +15,6 @@ import java.sql.ResultSet;
 import java.sql.SQLException;
 import java.sql.Timestamp;
 import java.time.Instant;
-import java.util.concurrent.atomic.AtomicInteger;
 
 /**
  * Replays the historical {@code visitor_logs} + {@code visitor_clicks}
@@ -56,72 +54,67 @@ public class BackfillService {
     /**
      * Replay every row in {@code visitor_logs}. Returns the number of
      * rows successfully fed through the pipeline.
+     *
+     * <p>The two tables are small (~4.5 k rows combined) so we load all
+     * synthesised events into memory first and close the SELECT connection
+     * before doing any UPSERTs. Streaming with a fetchSize would hold the
+     * cursor's connection open while each {@code rollup.upsert} starts a
+     * new transaction — that quickly exhausts Hikari (and Supabase pooler)
+     * with "Could not open JDBC Connection for transaction" errors.
      */
     public int backfillVisitorLogs() {
         log.info("{\"event\":\"backfill_start\",\"source\":\"visitor_logs\"}");
-        AtomicInteger ok = new AtomicInteger();
-        AtomicInteger bad = new AtomicInteger();
-        jdbc.setFetchSize(batchSize);
-        ResultSetExtractor<Void> rse = (ResultSet rs) -> {
-            while (rs.next()) {
-                try {
-                    RawEvent raw = rowToVisitorLogEvent(rs);
-                    if (raw == null) { bad.incrementAndGet(); continue; }
-                    EnrichedEvent enriched = pipeline.enrich(raw);
-                    rollup.upsert(enriched);
-                    int n = ok.incrementAndGet();
-                    if (n % 1000 == 0) {
-                        log.info("{\"event\":\"backfill_progress\",\"source\":\"visitor_logs\",\"rows\":{}}", n);
-                    }
-                } catch (RuntimeException rowErr) {
-                    bad.incrementAndGet();
-                    log.warn("{\"event\":\"backfill_row_failed\",\"source\":\"visitor_logs\",\"err\":\"{}\"}",
-                            rowErr.getMessage());
-                }
-            }
-            return null;
-        };
-        jdbc.query(
+        java.util.List<RawEvent> events = jdbc.query(
                 "select id, ip, local_time, event, ua, country, region, city, " +
                 "       latitude, longitude, created_at " +
                 "from visitor_logs order by id",
-                rse);
-        log.info("{\"event\":\"backfill_done\",\"source\":\"visitor_logs\",\"ok\":{},\"bad\":{}}", ok.get(), bad.get());
-        return ok.get();
+                (rs, rowNum) -> rowToVisitorLogEvent(rs));
+        int ok = 0, bad = 0;
+        for (RawEvent raw : events) {
+            if (raw == null) { bad++; continue; }
+            try {
+                EnrichedEvent enriched = pipeline.enrich(raw);
+                rollup.upsert(enriched);
+                ok++;
+                if (ok % 500 == 0) {
+                    log.info("{\"event\":\"backfill_progress\",\"source\":\"visitor_logs\",\"rows\":{}}", ok);
+                }
+            } catch (RuntimeException rowErr) {
+                bad++;
+                log.warn("{\"event\":\"backfill_row_failed\",\"source\":\"visitor_logs\",\"err\":\"{}\"}",
+                        rowErr.getMessage());
+            }
+        }
+        log.info("{\"event\":\"backfill_done\",\"source\":\"visitor_logs\",\"ok\":{},\"bad\":{}}", ok, bad);
+        return ok;
     }
 
     /** Replay every row in {@code visitor_clicks}. */
     public int backfillVisitorClicks() {
         log.info("{\"event\":\"backfill_start\",\"source\":\"visitor_clicks\"}");
-        AtomicInteger ok = new AtomicInteger();
-        AtomicInteger bad = new AtomicInteger();
-        jdbc.setFetchSize(batchSize);
-        ResultSetExtractor<Void> rse = (ResultSet rs) -> {
-            while (rs.next()) {
-                try {
-                    RawEvent raw = rowToVisitorClickEvent(rs);
-                    if (raw == null) { bad.incrementAndGet(); continue; }
-                    EnrichedEvent enriched = pipeline.enrich(raw);
-                    rollup.upsert(enriched);
-                    int n = ok.incrementAndGet();
-                    if (n % 1000 == 0) {
-                        log.info("{\"event\":\"backfill_progress\",\"source\":\"visitor_clicks\",\"rows\":{}}", n);
-                    }
-                } catch (RuntimeException rowErr) {
-                    bad.incrementAndGet();
-                    log.warn("{\"event\":\"backfill_row_failed\",\"source\":\"visitor_clicks\",\"err\":\"{}\"}",
-                            rowErr.getMessage());
-                }
-            }
-            return null;
-        };
-        jdbc.query(
+        java.util.List<RawEvent> events = jdbc.query(
                 "select id, click_event, target_url, local_time, ip, event, ua, " +
                 "       country, region, city, latitude, longitude, created_at " +
                 "from visitor_clicks order by id",
-                rse);
-        log.info("{\"event\":\"backfill_done\",\"source\":\"visitor_clicks\",\"ok\":{},\"bad\":{}}", ok.get(), bad.get());
-        return ok.get();
+                (rs, rowNum) -> rowToVisitorClickEvent(rs));
+        int ok = 0, bad = 0;
+        for (RawEvent raw : events) {
+            if (raw == null) { bad++; continue; }
+            try {
+                EnrichedEvent enriched = pipeline.enrich(raw);
+                rollup.upsert(enriched);
+                ok++;
+                if (ok % 500 == 0) {
+                    log.info("{\"event\":\"backfill_progress\",\"source\":\"visitor_clicks\",\"rows\":{}}", ok);
+                }
+            } catch (RuntimeException rowErr) {
+                bad++;
+                log.warn("{\"event\":\"backfill_row_failed\",\"source\":\"visitor_clicks\",\"err\":\"{}\"}",
+                        rowErr.getMessage());
+            }
+        }
+        log.info("{\"event\":\"backfill_done\",\"source\":\"visitor_clicks\",\"ok\":{},\"bad\":{}}", ok, bad);
+        return ok;
     }
 
     private RawEvent rowToVisitorLogEvent(ResultSet rs) throws SQLException {

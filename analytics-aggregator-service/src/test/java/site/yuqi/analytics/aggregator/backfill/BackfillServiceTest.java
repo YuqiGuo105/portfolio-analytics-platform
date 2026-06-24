@@ -6,7 +6,7 @@ import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.mockito.ArgumentCaptor;
 import org.springframework.jdbc.core.JdbcTemplate;
-import org.springframework.jdbc.core.ResultSetExtractor;
+import org.springframework.jdbc.core.RowMapper;
 import site.yuqi.analytics.aggregator.enrich.BotScoreService;
 import site.yuqi.analytics.aggregator.enrich.DedupService;
 import site.yuqi.analytics.aggregator.enrich.EnrichmentPipeline;
@@ -15,15 +15,17 @@ import site.yuqi.analytics.aggregator.enrich.IpHashService;
 import site.yuqi.analytics.aggregator.enrich.UaParserService;
 import site.yuqi.analytics.aggregator.service.RollupUpsertService;
 import site.yuqi.analytics.common.event.EnrichedEvent;
+import site.yuqi.analytics.common.event.RawEvent;
 
 import java.sql.ResultSet;
 import java.sql.SQLException;
 import java.sql.Timestamp;
 import java.time.Instant;
+import java.util.ArrayList;
+import java.util.List;
 
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.mockito.ArgumentMatchers.any;
-import static org.mockito.ArgumentMatchers.anyInt;
 import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.Mockito.atLeastOnce;
 import static org.mockito.Mockito.doAnswer;
@@ -35,10 +37,10 @@ import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
 /**
- * Backfill is too query-heavy to mock at the JdbcTemplate.queryForList
- * level; instead we stub {@link JdbcTemplate#query(String, ResultSetExtractor)}
- * with a hand-rolled {@link ResultSet} so the extractor's row loop is
- * exercised exactly as Postgres would drive it.
+ * Backfill collects every row into a List via {@link RowMapper}, then
+ * iterates outside the SELECT transaction. We stub
+ * {@link JdbcTemplate#query(String, RowMapper)} with a hand-rolled
+ * {@link ResultSet} so the mapper runs exactly as Postgres would drive it.
  */
 class BackfillServiceTest {
 
@@ -58,7 +60,6 @@ class BackfillServiceTest {
                 new GeoSnapService(),
                 mock(DedupService.class));
         svc = new BackfillService(jdbc, pipeline, rollup);
-        // Hand-set @Value-injected fields via reflection-free package method.
         org.springframework.test.util.ReflectionTestUtils.setField(svc, "siteId", "yuqi.site");
         org.springframework.test.util.ReflectionTestUtils.setField(svc, "batchSize", 100);
     }
@@ -116,7 +117,6 @@ class BackfillServiceTest {
     void rowFailureIsLoggedAndCountedAsBadButDoesNotAbort() throws SQLException {
         ResultSet rs = mockVisitorLogResultSet(2);
         stubJdbcQuery(rs);
-        doNothing().when(rollup).upsert(any());
         // First call throws; second succeeds.
         doThrow(new RuntimeException("boom")).doNothing().when(rollup).upsert(any());
 
@@ -126,13 +126,16 @@ class BackfillServiceTest {
         verify(rollup, atLeastOnce()).upsert(any());
     }
 
+    /** Drive a real RowMapper against a mocked ResultSet that walks {@code rs.next()}. */
     private void stubJdbcQuery(ResultSet rs) {
         doAnswer(inv -> {
-            ResultSetExtractor<?> rse = inv.getArgument(1);
-            rse.extractData(rs);
-            return null;
-        }).when(jdbc).query(anyString(), any(ResultSetExtractor.class));
-        doNothing().when(jdbc).setFetchSize(anyInt());
+            @SuppressWarnings("unchecked")
+            RowMapper<RawEvent> rm = (RowMapper<RawEvent>) inv.getArgument(1);
+            List<RawEvent> out = new ArrayList<>();
+            int row = 0;
+            while (rs.next()) out.add(rm.mapRow(rs, row++));
+            return out;
+        }).when(jdbc).query(anyString(), any(RowMapper.class));
     }
 
     private static ResultSet mockVisitorLogResultSet(int rows) {
