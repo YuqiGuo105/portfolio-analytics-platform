@@ -81,8 +81,8 @@ public class BackfillService {
                 }
             } catch (RuntimeException rowErr) {
                 bad++;
-                log.warn("{\"event\":\"backfill_row_failed\",\"source\":\"visitor_logs\",\"err\":\"{}\"}",
-                        rowErr.getMessage());
+                log.warn("{\"event\":\"backfill_row_failed\",\"source\":\"visitor_logs\",\"err\":\"{}\",\"root\":\"{}\"}",
+                        rowErr.getMessage(), rootCauseMessage(rowErr));
             }
         }
         log.info("{\"event\":\"backfill_done\",\"source\":\"visitor_logs\",\"ok\":{},\"bad\":{}}", ok, bad);
@@ -109,8 +109,8 @@ public class BackfillService {
                 }
             } catch (RuntimeException rowErr) {
                 bad++;
-                log.warn("{\"event\":\"backfill_row_failed\",\"source\":\"visitor_clicks\",\"err\":\"{}\"}",
-                        rowErr.getMessage());
+                log.warn("{\"event\":\"backfill_row_failed\",\"source\":\"visitor_clicks\",\"err\":\"{}\",\"root\":\"{}\"}",
+                        rowErr.getMessage(), rootCauseMessage(rowErr));
             }
         }
         log.info("{\"event\":\"backfill_done\",\"source\":\"visitor_clicks\",\"ok\":{},\"bad\":{}}", ok, bad);
@@ -183,5 +183,15 @@ public class BackfillService {
         if (s == null) return null;
         String t = s.trim();
         return t.isEmpty() ? null : t;
+    }
+
+    /** Walk the exception chain so we surface the underlying SQL error in the log. */
+    private static String rootCauseMessage(Throwable t) {
+        Throwable cur = t;
+        while (cur.getCause() != null && cur.getCause() != cur) {
+            cur = cur.getCause();
+        }
+        String m = cur.getMessage();
+        return m == null ? cur.getClass().getSimpleName() : m;
     }
 }
