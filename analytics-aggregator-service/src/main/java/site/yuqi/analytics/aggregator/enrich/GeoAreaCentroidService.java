@@ -21,14 +21,22 @@ import java.util.concurrent.ConcurrentHashMap;
  * COUNTRY → REGION → METRO, upserting each so that:
  * <ul>
  *   <li>the parent FK is satisfied (parents are inserted before children);</li>
- *   <li>an already-seeded centroid is never overwritten ({@code coalesce}
- *       keeps the existing value);</li>
- *   <li>a missing centroid on an existing row gets backfilled.</li>
+ *   <li>a real visitor coordinate <b>overrides</b> any previously-seeded
+ *       centroid — including the geometric, often-offshore country
+ *       centroids shipped by V3. We use {@code coalesce(excluded, existing)}
+ *       so a NULL input never clobbers a good value, but a non-null
+ *       visitor coord always wins;</li>
+ *   <li>the in-process {@code seen} set keeps the write amplification to
+ *       one DB roundtrip per (area_id) per process lifetime — important
+ *       because this runs on the hot enrichment path.</li>
  * </ul>
  *
- * <p>An in-process {@link ConcurrentHashMap}-backed seen-set keeps the
- * write amplification to one DB roundtrip per (area_id) per process
- * lifetime — important because this runs on the hot enrichment path.
+ * <p>Why "newer wins" instead of "first wins": V3 seeded country centroids
+ * with population-weighted GeoNames coordinates that, while plausible on a
+ * map, land in oceans / wilderness for several countries (CA mid-prairie,
+ * RU mid-Siberia, AU central desert, NO mid-forest). The dashboard goal is
+ * Apple-Photos-Map-style pins on land where visitors actually were, so we
+ * must let live (coarsened) coordinates take over.
  */
 @Service
 @Slf4j
@@ -40,8 +48,12 @@ public class GeoAreaCentroidService {
             "  (geo_area_id, geo_level, parent_id, name, country, region, center_lat, center_lng) " +
             "values (?, ?, ?, ?, ?, ?, ?, ?) " +
             "on conflict (geo_area_id) do update set " +
-            "  center_lat = coalesce(public.geo_areas.center_lat, excluded.center_lat), " +
-            "  center_lng = coalesce(public.geo_areas.center_lng, excluded.center_lng)";
+            // NOTE: argument order is (new, old) — we want the new value
+            // to win, falling back to the existing only when the inbound
+            // coord is null. See the class javadoc for why we flipped this
+            // from the original "first writer wins" semantics.
+            "  center_lat = coalesce(excluded.center_lat, public.geo_areas.center_lat), " +
+            "  center_lng = coalesce(excluded.center_lng, public.geo_areas.center_lng)";
 
     private final JdbcTemplate jdbc;
 
