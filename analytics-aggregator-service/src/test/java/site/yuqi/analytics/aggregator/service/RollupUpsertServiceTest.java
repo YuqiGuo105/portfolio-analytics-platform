@@ -15,6 +15,7 @@ import java.util.List;
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyString;
+import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.times;
 import static org.mockito.Mockito.verify;
@@ -117,5 +118,66 @@ class RollupUpsertServiceTest {
                 "desktop", "Chrome", "macOS", false, 0.0,
                 "hash",
                 new EnrichedGeo(GeoLevel.METRO, "METRO:US:UT:Salt Lake City", "US", "UT", "Salt Lake City"));
+    }
+
+    // ---------------------------------------------------------------- batch
+
+    @Test
+    void upsertBatchCollapsesSameKeyEvents() {
+        // Three events at the same 5m bucket, same geo, same UA — should
+        // collapse to ONE row per granularity (2 rows total) with count=3.
+        Instant ts = Instant.parse("2026-06-23T12:03:00Z");
+        List<EnrichedEvent> batch = List.of(
+                sampleEvent("e1", ts),
+                sampleEvent("e2", ts.plusSeconds(30)),  // 12:03:30 — same 5m bucket
+                sampleEvent("e3", ts.plusSeconds(90))   // 12:04:30 — still same 5m bucket
+        );
+
+        svc.upsertBatch(batch);
+
+        ArgumentCaptor<List<Object[]>> rowsCaptor = ArgumentCaptor.forClass(List.class);
+        verify(jdbc, times(2)).batchUpdate(anyString(), rowsCaptor.capture());
+
+        List<List<Object[]>> calls = rowsCaptor.getAllValues();
+        // One batch per granularity tier.
+        assertThat(calls).hasSize(2);
+
+        // Each granularity tier should collapse to exactly one row.
+        assertThat(calls.get(0)).hasSize(1);
+        assertThat(calls.get(1)).hasSize(1);
+
+        // Counts are aggregated (event_count, unique_sessions are the last two params).
+        Object[] fiveMinRow = calls.get(0).get(0);
+        assertThat(fiveMinRow[fiveMinRow.length - 2]).isEqualTo(3L); // event_count
+        assertThat(fiveMinRow[fiveMinRow.length - 1]).isEqualTo(3L); // unique_sessions
+    }
+
+    @Test
+    void upsertBatchKeepsDistinctKeysSeparate() {
+        // Two events with different countries → 2 distinct rows per granularity.
+        Instant ts = Instant.parse("2026-06-23T12:03:00Z");
+        EnrichedEvent us = sampleEvent("e1", ts);
+        EnrichedEvent ca = new EnrichedEvent(
+                "e2", "yuqi.site", "page_view",
+                ts, ts.plusMillis(50),
+                "sess-2", "anon-2", "/", null, null,
+                "desktop", "Chrome", "macOS", false, 0.0,
+                "hash-2",
+                new EnrichedGeo(GeoLevel.COUNTRY, "COUNTRY:CA", "CA", null, null));
+
+        svc.upsertBatch(List.of(us, ca));
+
+        ArgumentCaptor<List<Object[]>> rowsCaptor = ArgumentCaptor.forClass(List.class);
+        verify(jdbc, times(2)).batchUpdate(anyString(), rowsCaptor.capture());
+        // 2 distinct keys → 2 rows per granularity.
+        assertThat(rowsCaptor.getAllValues().get(0)).hasSize(2);
+        assertThat(rowsCaptor.getAllValues().get(1)).hasSize(2);
+    }
+
+    @Test
+    void upsertBatchEmptyListIsNoop() {
+        svc.upsertBatch(List.of());
+        verify(jdbc, times(0)).batchUpdate(anyString(), any(List.class));
+        verify(jdbc, times(0)).update(anyString(), (Object[]) any());
     }
 }

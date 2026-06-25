@@ -1,7 +1,9 @@
 package site.yuqi.analytics.aggregator.kafka;
 
+import org.apache.kafka.clients.consumer.ConsumerRecord;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
+import org.springframework.kafka.support.Acknowledgment;
 import site.yuqi.analytics.aggregator.enrich.EnrichmentPipeline;
 import site.yuqi.analytics.aggregator.service.RollupUpsertService;
 import site.yuqi.analytics.common.event.EnrichedEvent;
@@ -11,9 +13,11 @@ import site.yuqi.analytics.common.kafka.DlqProducer;
 import site.yuqi.analytics.common.kafka.Outcome;
 
 import java.time.Instant;
+import java.util.List;
 
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.ArgumentMatchers.anyList;
 import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.doAnswer;
@@ -129,5 +133,87 @@ class RawEventConsumerTest {
                 "desktop", "chrome", "macos",
                 false, 0.1, "deadbeef",
                 new EnrichedGeo(GeoLevel.COUNTRY, "COUNTRY:US", "US", null, null));
+    }
+
+    // ---------------------------------------------------------------- batch listener
+
+    @Test
+    void batchHappyPathCallsUpsertBatchAndAcks() {
+        EnrichedEvent enriched = sampleEnriched();
+        doAnswer(inv -> {
+            EnrichmentPipeline.ParseResult pr = inv.getArgument(1);
+            pr.eventId = enriched.eventId();
+            return enriched;
+        }).when(pipeline).parseAndEnrich(anyString(), any(EnrichmentPipeline.ParseResult.class));
+        doNothing().when(rollup).upsertBatch(anyList());
+
+        Acknowledgment ack = mock(Acknowledgment.class);
+        consumer.onMessage(List.of(record("k1", "{\"x\":1}", 0L)), ack);
+
+        verify(rollup, times(1)).upsertBatch(anyList());
+        verify(ack,    times(1)).acknowledge();
+        verify(dlq,    never()).publish(any(), any(), any());
+    }
+
+    @Test
+    void batchParseFailureGoesToDlqAndStillAcksGoodRecords() {
+        EnrichedEvent good = sampleEnriched();
+        doAnswer(inv -> {
+            EnrichmentPipeline.ParseResult pr = inv.getArgument(1);
+            String value = inv.getArgument(0);
+            if ("bad".equals(value)) {
+                pr.parseError = "parse_error";
+                return null;
+            }
+            pr.eventId = good.eventId();
+            return good;
+        }).when(pipeline).parseAndEnrich(anyString(), any(EnrichmentPipeline.ParseResult.class));
+
+        Acknowledgment ack = mock(Acknowledgment.class);
+        consumer.onMessage(List.of(
+                record("kgood", "{}",  10L),
+                record("kbad",  "bad", 11L)
+        ), ack);
+
+        verify(dlq,    times(1)).publish(eq("kbad"), eq("bad"), anyString());
+        verify(rollup, times(1)).upsertBatch(anyList());  // good record still processed
+        verify(ack,    times(1)).acknowledge();
+    }
+
+    @Test
+    void batchDbFailureLeavesUnacked() {
+        EnrichedEvent enriched = sampleEnriched();
+        doAnswer(inv -> {
+            EnrichmentPipeline.ParseResult pr = inv.getArgument(1);
+            pr.eventId = enriched.eventId();
+            return enriched;
+        }).when(pipeline).parseAndEnrich(anyString(), any(EnrichmentPipeline.ParseResult.class));
+        doThrow(new RuntimeException("db gone")).when(rollup).upsertBatch(anyList());
+
+        Acknowledgment ack = mock(Acknowledgment.class);
+        consumer.onMessage(List.of(record("k", "{}", 1L)), ack);
+
+        verify(ack, never()).acknowledge();
+        verify(dlq, never()).publish(any(), any(), any());
+    }
+
+    @Test
+    void batchAllDuplicatesAcksAndSkipsUpsert() {
+        doAnswer(inv -> {
+            EnrichmentPipeline.ParseResult pr = inv.getArgument(1);
+            pr.duplicate = true;
+            return null;
+        }).when(pipeline).parseAndEnrich(anyString(), any(EnrichmentPipeline.ParseResult.class));
+
+        Acknowledgment ack = mock(Acknowledgment.class);
+        consumer.onMessage(List.of(record("k", "{}", 1L)), ack);
+
+        verify(rollup, never()).upsertBatch(anyList());
+        verify(ack,    times(1)).acknowledge();
+        verify(dlq,    never()).publish(any(), any(), any());
+    }
+
+    private static ConsumerRecord<String, String> record(String key, String value, long offset) {
+        return new ConsumerRecord<>("analytics.raw.events", 0, offset, key, value);
     }
 }
