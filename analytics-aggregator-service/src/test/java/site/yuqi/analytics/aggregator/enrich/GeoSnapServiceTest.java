@@ -6,10 +6,14 @@ import site.yuqi.analytics.common.event.GeoHint;
 import site.yuqi.analytics.common.event.GeoLevel;
 
 import static org.assertj.core.api.Assertions.assertThat;
+import static org.mockito.Mockito.mock;
 
 class GeoSnapServiceTest {
 
-    private final GeoSnapService svc = new GeoSnapService();
+    // The centroid lazy-writer is a fire-and-forget side effect we don't
+    // care to assert on at this layer; a no-op mock keeps these unit tests
+    // isolated from the DB.
+    private final GeoSnapService svc = new GeoSnapService(mock(GeoAreaCentroidService.class));
 
     @Test
     void nullHintBecomesGlobalBucket() {

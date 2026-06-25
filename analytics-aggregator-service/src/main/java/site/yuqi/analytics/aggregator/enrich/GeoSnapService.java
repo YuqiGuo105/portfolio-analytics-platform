@@ -1,5 +1,6 @@
 package site.yuqi.analytics.aggregator.enrich;
 
+import lombok.RequiredArgsConstructor;
 import org.springframework.stereotype.Service;
 import site.yuqi.analytics.common.event.EnrichedGeo;
 import site.yuqi.analytics.common.event.GeoHint;
@@ -14,20 +15,33 @@ import site.yuqi.analytics.common.event.GeoLevel;
  * hierarchy until we find a level the dimension knows about. Worst case
  * we return a GLOBAL bucket — which is correct, just less useful.
  *
- * <p>The full implementation (TODO) loads {@code geo_areas} into a JTS
- * R-Tree on startup and performs an actual point-in-polygon snap. The
- * privacy invariant we hold today: <b>raw lat/lng never escape this
- * service</b>.
+ * <p>As a side effect this service hands the visitor's raw lat/lng off
+ * to {@link GeoAreaCentroidService#ensureChain} so the matching
+ * {@code geo_areas} rows get a coarsened centroid the first time we see
+ * them. The raw coordinates do <b>not</b> escape this method —
+ * {@code ensureChain} quantises to 0.1° internally and the returned
+ * {@link EnrichedGeo} carries no lat/lng. That keeps the privacy
+ * invariant intact.
  */
 @Service
+@RequiredArgsConstructor
 public class GeoSnapService {
 
     private static final String GLOBAL_AREA_ID = "GLOBAL";
+
+    private final GeoAreaCentroidService centroids;
 
     public EnrichedGeo snap(GeoHint hint) {
         if (hint == null) {
             return new EnrichedGeo(GeoLevel.GLOBAL, GLOBAL_AREA_ID, null, null, null);
         }
+        // Privacy-bound side effect: lazy-populate the dimension table so
+        // the dashboard's pin lands close to where the visitor actually
+        // was, not on the (often offshore) country centroid. The centroid
+        // service coarsens to 0.1°; raw lat/lng never leave this call.
+        centroids.ensureChain(hint.country(), hint.region(), hint.city(),
+                hint.lat(), hint.lng());
+
         // Strict ascending fallback: METRO → REGION → COUNTRY → GLOBAL.
         if (hint.city() != null && !hint.city().isBlank()
                 && hint.country() != null && !hint.country().isBlank()) {

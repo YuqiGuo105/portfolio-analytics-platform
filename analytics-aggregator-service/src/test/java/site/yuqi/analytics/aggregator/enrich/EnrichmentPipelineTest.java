@@ -26,7 +26,7 @@ class EnrichmentPipelineTest {
         IpHashService ip = new IpHashService("test-salt");
         UaParserService ua = new UaParserService();
         BotScoreService bot = new BotScoreService();
-        GeoSnapService geo = new GeoSnapService();
+        GeoSnapService geo = new GeoSnapService(mock(GeoAreaCentroidService.class));
         dedup = mock(DedupService.class);
         pipeline = new EnrichmentPipeline(mapper, ip, ua, bot, geo, dedup);
     }

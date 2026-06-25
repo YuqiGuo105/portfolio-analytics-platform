@@ -10,6 +10,7 @@ import org.springframework.jdbc.core.RowMapper;
 import site.yuqi.analytics.aggregator.enrich.BotScoreService;
 import site.yuqi.analytics.aggregator.enrich.DedupService;
 import site.yuqi.analytics.aggregator.enrich.EnrichmentPipeline;
+import site.yuqi.analytics.aggregator.enrich.GeoAreaCentroidService;
 import site.yuqi.analytics.aggregator.enrich.GeoSnapService;
 import site.yuqi.analytics.aggregator.enrich.IpHashService;
 import site.yuqi.analytics.aggregator.enrich.UaParserService;
@@ -57,7 +58,7 @@ class BackfillServiceTest {
                 new IpHashService("salt"),
                 new UaParserService(),
                 new BotScoreService(),
-                new GeoSnapService(),
+                new GeoSnapService(mock(GeoAreaCentroidService.class)),
                 mock(DedupService.class));
         svc = new BackfillService(jdbc, pipeline, rollup);
         org.springframework.test.util.ReflectionTestUtils.setField(svc, "siteId", "yuqi.site");

@@ -27,10 +27,18 @@ class PublicVisitsControllerTest {
 
     @Test
     void markersReturnsAggregatedRows() {
+        // Endpoint signature is now (window, days, level, latMin, latMax, lngMin, lngMax, limit) —
+        // pass legacy days=30 with everything else null to exercise the
+        // backward-compat path through resolveWindow().
         when(jdbc.queryForList(anyString(), any(Object[].class)))
                 .thenReturn(List.of(Map.of("country", "US", "count", 42L, "lat", 39.83, "lng", -98.58)));
 
-        List<Map<String, Object>> out = ctrl.markers(30);
+        List<Map<String, Object>> out = ctrl.markers(
+                null,                 // window
+                Integer.valueOf(30),  // days (legacy)
+                null,                 // level
+                null, null, null, null, // bbox
+                null);                // limit
 
         assertThat(out).hasSize(1);
         assertThat(out.get(0)).containsEntry("country", "US").containsEntry("count", 42L);
@@ -43,7 +51,7 @@ class PublicVisitsControllerTest {
         when(jdbc.queryForList(anyString(), any(Object[].class)))
                 .thenReturn(List.of(Map.of("country", "US", "count", 10L)));
 
-        Map<String, Object> out = ctrl.summary(7);
+        Map<String, Object> out = ctrl.summary(null, Integer.valueOf(7));
 
         assertThat(out)
                 .containsEntry("siteId", "yuqi.site")
@@ -52,5 +60,19 @@ class PublicVisitsControllerTest {
         assertThat(out).containsKey("topCountries");
         assertThat(out).containsKey("topDevices");
         assertThat(out).containsKey("timeSeries");
+    }
+
+    @Test
+    void summaryAcceptsWindowParam() {
+        // window="all" takes precedence over days; resolveWindow exposes
+        // it as days=0 in the response payload.
+        when(jdbc.queryForMap(anyString(), any(Object[].class)))
+                .thenReturn(Map.of("events", 1L, "clicks", 0L, "pageViews", 1L));
+        when(jdbc.queryForList(anyString(), any(Object[].class)))
+                .thenReturn(List.of());
+
+        Map<String, Object> out = ctrl.summary("all", null);
+
+        assertThat(out).containsEntry("window", "all").containsEntry("days", 0);
     }
 }

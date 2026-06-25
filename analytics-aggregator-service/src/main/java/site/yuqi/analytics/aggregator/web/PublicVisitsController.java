@@ -2,12 +2,14 @@ package site.yuqi.analytics.aggregator.web;
 
 import lombok.RequiredArgsConstructor;
 import org.springframework.beans.factory.annotation.Value;
+import org.springframework.http.HttpStatus;
 import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.web.bind.annotation.CrossOrigin;
 import org.springframework.web.bind.annotation.GetMapping;
 import org.springframework.web.bind.annotation.RequestMapping;
 import org.springframework.web.bind.annotation.RequestParam;
 import org.springframework.web.bind.annotation.RestController;
+import org.springframework.web.server.ResponseStatusException;
 
 import java.time.Instant;
 import java.time.temporal.ChronoUnit;
@@ -18,13 +20,18 @@ import java.util.Map;
 /**
  * Public read endpoints powering the visitor globe and the
  * {@code /analytics} page on the Portfolio dashboard. No auth — this is
- * the same trust posture as the existing {@code visitor_logs} table the
- * Portfolio queries directly from Supabase.
+ * the same trust posture as the legacy {@code visitor_logs} table the
+ * Portfolio used to query directly from Supabase.
  *
- * <p>CORS is permissive on these specific endpoints because Render and
- * Vercel live on different origins. Everything else on the service is
- * still locked down by the absence of any other public controller +
- * actuator's built-in security.
+ * <p>CORS is permissive on these specific endpoints because Render /
+ * Cloud Run and Vercel live on different origins. Everything else on the
+ * service is still locked down by the absence of any other public
+ * controller + actuator's built-in security.
+ *
+ * <p>All query endpoints accept a {@code window} parameter
+ * ({@code 7d|30d|90d|all}). For backwards compatibility, the older
+ * {@code days} parameter is honoured when {@code window} is not given —
+ * {@code days=0} or any non-positive value maps to {@code all}.
  */
 @RestController
 @RequestMapping("/api/public")
@@ -36,153 +43,98 @@ import java.util.Map;
 @RequiredArgsConstructor
 public class PublicVisitsController {
 
+    /** Hard ceilings per level so a misbehaving client can't ask for everything. */
+    private static final int LIMIT_COUNTRY = 300;
+    private static final int LIMIT_REGION = 1500;
+    private static final int LIMIT_METRO = 6000;
+    private static final int LIMIT_DEFAULT = 6000;
+    private static final int LIMIT_HARD_CEILING = 10000;
+
+    /**
+     * Largest viewport (in square degrees) allowed when {@code window=all}.
+     * 180° × 360° = 64800 covers the whole globe. We allow up to one
+     * hemisphere (~32400) for the page-level "show everything everywhere
+     * across all time" view; anything bigger we'd rather force the client
+     * to use a narrower window so the join stays small.
+     */
+    private static final double MAX_BBOX_AREA_ALL = 32_400.0;
+
     private final JdbcTemplate jdbc;
 
     @Value("${analytics.backfill.site-id:yuqi.site}")
     private String siteId;
 
     /**
-     * Per-country (or per-METRO when seeded) counts since {@code days} ago,
-     * joined with {@code geo_areas.center_lat/lng} so the globe can place
-     * a marker. METRO buckets win over their COUNTRY parents when present.
+     * Per-area counts joined with {@code geo_areas.center_lat/lng} so the
+     * globe can place a marker. METRO buckets win over their COUNTRY
+     * parents when present.
      *
-     * <p>Pass {@code days=0} (or any non-positive number) to drop the time
-     * filter entirely and return the all-time aggregate. This is the
-     * "All visitors" view powering the home-page globe.
+     * <p>This single endpoint covers three use cases the dashboard needs:
+     * <ul>
+     *   <li>Page-level "All time" snapshot ({@code window=all}, no bbox).</li>
+     *   <li>Sliding-window stats ({@code window=7d|30d|90d}, no bbox).</li>
+     *   <li>Viewport-aware re-fetch when the globe pans/zooms — pass
+     *       bbox + {@code level} and we return only what's visible.</li>
+     * </ul>
      *
-     * @param days how far back to roll up (default 30, {@code <=0} for all time)
-     * @return list of {country, region, geoAreaId, lat, lng, count}
+     * <p>Rows whose centroid is unknown ({@code center_lat IS NULL}) are
+     * filtered out at the SQL layer because the client can't render them
+     * anyway, and serving NULLs in the JSON only inflates the payload.
+     *
+     * @param window  time window: {@code 7d}, {@code 30d}, {@code 90d}, or
+     *                {@code all}. Default {@code 30d}.
+     * @param days    legacy alias for {@code window}; pass {@code 0} for
+     *                all-time. Ignored when {@code window} is provided.
+     * @param level   optional LOD filter: {@code COUNTRY|REGION|METRO} (or
+     *                the older zoom-bucket aliases {@code world|continent|local}).
+     * @param latMin  southern edge of the viewport, degrees [-89.9, 89.9].
+     * @param latMax  northern edge of the viewport, degrees [-89.9, 89.9].
+     * @param lngMin  western edge, degrees [-180, 180] (may exceed {@code lngMax}
+     *                to indicate an antimeridian-wrapped window).
+     * @param lngMax  eastern edge, degrees [-180, 180].
+     * @param limit   server-side row cap; defaults to a per-level cap if omitted.
      */
     @GetMapping("/visits/markers")
     public List<Map<String, Object>> markers(
-            @RequestParam(value = "days", defaultValue = "30") int days) {
-        boolean allTime = days <= 0;
-        // Aggregate over time at the 1d granularity (fewer rows than 5m).
-        String sql =
-                "select r.geo_area_id      as \"geoAreaId\", " +
-                "       r.geo_level        as \"geoLevel\", " +
-                "       r.country          as \"country\", " +
-                "       coalesce(a.name, r.country) as \"name\", " +
-                "       a.region           as \"region\", " +
-                "       a.center_lat       as \"lat\", " +
-                "       a.center_lng       as \"lng\", " +
-                "       sum(r.event_count) as \"count\" " +
-                "from public.geo_time_rollups r " +
-                "left join public.geo_areas a on a.geo_area_id = r.geo_area_id " +
-                "where r.site_id = ? and r.granularity = '1d' " +
-                (allTime ? "" : "  and r.bucket_time >= ? ") +
-                "group by r.geo_area_id, r.geo_level, r.country, a.name, a.region, a.center_lat, a.center_lng " +
-                "order by sum(r.event_count) desc " +
-                "limit 5000";
-        if (allTime) {
-            return jdbc.queryForList(sql, siteId);
+            @RequestParam(value = "window", required = false) String window,
+            @RequestParam(value = "days", required = false) Integer days,
+            @RequestParam(value = "level", required = false) String level,
+            @RequestParam(value = "latMin", required = false) Double latMin,
+            @RequestParam(value = "latMax", required = false) Double latMax,
+            @RequestParam(value = "lngMin", required = false) Double lngMin,
+            @RequestParam(value = "lngMax", required = false) Double lngMax,
+            @RequestParam(value = "limit", required = false) Integer limit) {
+
+        WindowSpec ws = resolveWindow(window, days);
+        String geoLevel = normalizeLevel(level);
+        BBox bbox = BBox.maybe(latMin, latMax, lngMin, lngMax);
+
+        if (ws.allTime && bbox != null && bbox.area() > MAX_BBOX_AREA_ALL) {
+            throw new ResponseStatusException(HttpStatus.BAD_REQUEST,
+                    "bbox too large for window=all; narrow the window or shrink the viewport");
         }
-        Instant since = Instant.now().minus(days, ChronoUnit.DAYS);
-        return jdbc.queryForList(sql, siteId, java.sql.Timestamp.from(since));
+
+        int boundedLimit = clampLimit(limit, defaultLimitFor(geoLevel));
+        return runMarkersQuery(ws, geoLevel, bbox, boundedLimit);
     }
 
     /**
-     * Same data as {@link #markers(int)} but scoped to a lat/lng bounding box
-     * and (optionally) a single {@code geo_level} bucket. This powers the
-     * "zoom-in re-fetch" behavior on the globe: when the user pans or zooms
-     * the camera, the client sends the visible window + a desired level
-     * (world / continent / local) and receives only the markers that fall
-     * inside it, ranked by event count.
-     *
-     * <p>The {@code lngMin}/{@code lngMax} pair may wrap the antimeridian
-     * (i.e. {@code lngMin > lngMax}); in that case the predicate becomes
-     * {@code center_lng >= lngMin OR center_lng <= lngMax}, matching the
-     * two halves of the wrapped window.
-     *
-     * @param days     how far back to roll up (default 30)
-     * @param latMin   southern edge of the visible window, degrees [-90, 90]
-     * @param latMax   northern edge of the visible window, degrees [-90, 90]
-     * @param lngMin   western edge, degrees [-180, 180] (may exceed lngMax to
-     *                 indicate an antimeridian-wrapped window)
-     * @param lngMax   eastern edge, degrees [-180, 180]
-     * @param level    optional zoom bucket: {@code world}/{@code continent}
-     *                 map to {@code COUNTRY} rollups, {@code local} maps to
-     *                 {@code METRO}. {@code null} or unknown returns all
-     *                 levels.
-     * @param limit    server-side row cap (default 1600, hard ceiling 5000)
+     * Backwards-compatible alias for the older viewport endpoint the
+     * deployed frontend still calls. New clients should use
+     * {@link #markers(String, Integer, String, Double, Double, Double, Double, Integer)}
+     * — this thin wrapper delegates to the same query path.
      */
     @GetMapping("/visits/markers/area")
     public List<Map<String, Object>> markersInArea(
-            @RequestParam(value = "days", defaultValue = "30") int days,
+            @RequestParam(value = "window", required = false) String window,
+            @RequestParam(value = "days", required = false) Integer days,
             @RequestParam("latMin") double latMin,
             @RequestParam("latMax") double latMax,
             @RequestParam("lngMin") double lngMin,
             @RequestParam("lngMax") double lngMax,
             @RequestParam(value = "level", required = false) String level,
-            @RequestParam(value = "limit", defaultValue = "1600") int limit) {
-        boolean allTime = days <= 0;
-        int boundedLimit = Math.min(Math.max(limit, 1), 5000);
-
-        StringBuilder sql = new StringBuilder(
-                "select r.geo_area_id      as \"geoAreaId\", " +
-                "       r.geo_level        as \"geoLevel\", " +
-                "       r.country          as \"country\", " +
-                "       coalesce(a.name, r.country) as \"name\", " +
-                "       a.region           as \"region\", " +
-                "       a.center_lat       as \"lat\", " +
-                "       a.center_lng       as \"lng\", " +
-                "       sum(r.event_count) as \"count\" " +
-                "from public.geo_time_rollups r " +
-                "left join public.geo_areas a on a.geo_area_id = r.geo_area_id " +
-                "where r.site_id = ? and r.granularity = '1d' "
-                + (allTime ? "" : "  and r.bucket_time >= ? ") +
-                "  and a.center_lat is not null and a.center_lng is not null " +
-                "  and a.center_lat between ? and ? ");
-        List<Object> params = new ArrayList<>();
-        params.add(siteId);
-        if (!allTime) {
-            params.add(java.sql.Timestamp.from(Instant.now().minus(days, ChronoUnit.DAYS)));
-        }
-        params.add(latMin);
-        params.add(latMax);
-
-        if (lngMin <= lngMax) {
-            sql.append("  and a.center_lng between ? and ? ");
-            params.add(lngMin);
-            params.add(lngMax);
-        } else {
-            // Antimeridian wrap: the visible window straddles ±180.
-            sql.append("  and (a.center_lng >= ? or a.center_lng <= ?) ");
-            params.add(lngMin);
-            params.add(lngMax);
-        }
-
-        String geoLevel = mapZoomBucketToGeoLevel(level);
-        if (geoLevel != null) {
-            sql.append("  and r.geo_level = ? ");
-            params.add(geoLevel);
-        }
-
-        sql.append("group by r.geo_area_id, r.geo_level, r.country, a.name, a.region, a.center_lat, a.center_lng ");
-        sql.append("order by sum(r.event_count) desc ");
-        sql.append("limit ?");
-        params.add(boundedLimit);
-
-        return jdbc.queryForList(sql.toString(), params.toArray());
-    }
-
-    /**
-     * Translate the globe's zoom bucket into the matching rollup level.
-     * The two coarser buckets share COUNTRY because that is the only level
-     * with comprehensive seed data; METRO is reserved for the most zoomed-in
-     * view where city-scale pins are useful and privacy-safe.
-     */
-    private static String mapZoomBucketToGeoLevel(String level) {
-        if (level == null) return null;
-        switch (level.toLowerCase()) {
-            case "world":
-            case "continent":
-                return "COUNTRY";
-            case "local":
-                return "METRO";
-            default:
-                return null;
-        }
+            @RequestParam(value = "limit", required = false) Integer limit) {
+        return markers(window, days, level, latMin, latMax, lngMin, lngMax, limit);
     }
 
     /**
@@ -191,19 +143,17 @@ public class PublicVisitsController {
      *   <li>{@code totals} — total events, total clicks, total page_views</li>
      *   <li>{@code topCountries} — top 20 countries by event count</li>
      *   <li>{@code topDevices} — split by deviceType</li>
-     *   <li>{@code timeSeries} — daily buckets (events/day) over {@code days}</li>
+     *   <li>{@code timeSeries} — daily buckets (events/day)</li>
      * </ul>
      */
     @GetMapping("/visits/summary")
     public Map<String, Object> summary(
-            @RequestParam(value = "days", defaultValue = "30") int days) {
-        boolean allTime = days <= 0;
-        String timeFilter = allTime ? "" : "  and bucket_time >= ? ";
-        java.sql.Timestamp sinceTs = allTime
-                ? null
-                : java.sql.Timestamp.from(Instant.now().minus(days, ChronoUnit.DAYS));
+            @RequestParam(value = "window", required = false) String window,
+            @RequestParam(value = "days", required = false) Integer days) {
 
-        Object[] base = allTime ? new Object[]{siteId} : new Object[]{siteId, sinceTs};
+        WindowSpec ws = resolveWindow(window, days);
+        String timeFilter = ws.allTime ? "" : "  and bucket_time >= ? ";
+        Object[] base = ws.allTime ? new Object[]{siteId} : new Object[]{siteId, ws.timestampSince()};
 
         Map<String, Object> totalsRow = jdbc.queryForMap(
                 "select coalesce(sum(event_count), 0) as \"events\", " +
@@ -236,10 +186,201 @@ public class PublicVisitsController {
 
         return Map.of(
                 "siteId", siteId,
-                "days", days,
+                "window", ws.label,
+                "days", ws.legacyDays,
                 "totals", totalsRow,
                 "topCountries", topCountries,
                 "topDevices", topDevices,
                 "timeSeries", timeSeries);
+    }
+
+    // ────────────────────────────────────────────────────────────────────
+    // Query implementation
+    // ────────────────────────────────────────────────────────────────────
+
+    /**
+     * One markers query shared by both the page-level and viewport-scoped
+     * endpoints. We INNER JOIN (not LEFT JOIN) because a missing centroid
+     * is unusable for the globe; the legacy LEFT JOIN was returning
+     * null-lat rows that the client just had to throw away.
+     */
+    private List<Map<String, Object>> runMarkersQuery(
+            WindowSpec ws, String geoLevel, BBox bbox, int limit) {
+
+        StringBuilder sql = new StringBuilder(
+                "select r.geo_area_id      as \"geoAreaId\", " +
+                "       r.geo_level        as \"geoLevel\", " +
+                "       r.country          as \"country\", " +
+                "       coalesce(a.name, r.country) as \"name\", " +
+                "       a.region           as \"region\", " +
+                "       a.center_lat       as \"lat\", " +
+                "       a.center_lng       as \"lng\", " +
+                "       sum(r.event_count) as \"count\" " +
+                "from public.geo_time_rollups r " +
+                "join public.geo_areas a on a.geo_area_id = r.geo_area_id " +
+                "where r.site_id = ? and r.granularity = '1d' " +
+                "  and a.center_lat is not null and a.center_lng is not null ");
+
+        List<Object> params = new ArrayList<>();
+        params.add(siteId);
+        if (!ws.allTime) {
+            sql.append("  and r.bucket_time >= ? ");
+            params.add(ws.timestampSince());
+        }
+        if (geoLevel != null) {
+            sql.append("  and r.geo_level = ? ");
+            params.add(geoLevel);
+        }
+        if (bbox != null) {
+            sql.append("  and a.center_lat between ? and ? ");
+            params.add(bbox.minLat);
+            params.add(bbox.maxLat);
+            if (bbox.minLng <= bbox.maxLng) {
+                sql.append("  and a.center_lng between ? and ? ");
+                params.add(bbox.minLng);
+                params.add(bbox.maxLng);
+            } else {
+                // Antimeridian wrap: viewport straddles ±180°.
+                sql.append("  and (a.center_lng >= ? or a.center_lng <= ?) ");
+                params.add(bbox.minLng);
+                params.add(bbox.maxLng);
+            }
+        }
+
+        sql.append("group by r.geo_area_id, r.geo_level, r.country, a.name, a.region, a.center_lat, a.center_lng ");
+        sql.append("order by sum(r.event_count) desc ");
+        sql.append("limit ?");
+        params.add(limit);
+
+        return jdbc.queryForList(sql.toString(), params.toArray());
+    }
+
+    // ────────────────────────────────────────────────────────────────────
+    // Parameter normalisation
+    // ────────────────────────────────────────────────────────────────────
+
+    /** Resolves {@code window} (preferred) / {@code days} (legacy) into a window spec. */
+    private static WindowSpec resolveWindow(String window, Integer days) {
+        if (window != null && !window.isBlank()) {
+            String w = window.trim().toLowerCase();
+            switch (w) {
+                case "7d":  return new WindowSpec(false, 7, "7d");
+                case "30d": return new WindowSpec(false, 30, "30d");
+                case "90d": return new WindowSpec(false, 90, "90d");
+                case "all": return new WindowSpec(true, 0, "all");
+                default:
+                    throw new ResponseStatusException(HttpStatus.BAD_REQUEST,
+                            "unknown window: " + window + " (allowed: 7d, 30d, 90d, all)");
+            }
+        }
+        if (days != null) {
+            if (days <= 0) return new WindowSpec(true, 0, "all");
+            return new WindowSpec(false, days, days + "d");
+        }
+        // Neither given — default to 30d, matching the legacy endpoint behaviour.
+        return new WindowSpec(false, 30, "30d");
+    }
+
+    /**
+     * Normalise an externally-provided level to one of COUNTRY / REGION /
+     * METRO. Accepts both literal level names and the older zoom-bucket
+     * aliases ({@code world}, {@code continent}, {@code local}). Rejects
+     * GLOBAL — that level has no per-area pin to render and asking for it
+     * would just return the bucket-of-everything row.
+     */
+    private static String normalizeLevel(String level) {
+        if (level == null || level.isBlank()) return null;
+        String l = level.trim().toUpperCase();
+        switch (l) {
+            case "COUNTRY":
+            case "WORLD":
+            case "CONTINENT":
+                return "COUNTRY";
+            case "REGION":
+                return "REGION";
+            case "METRO":
+            case "LOCAL":
+                return "METRO";
+            case "GLOBAL":
+                throw new ResponseStatusException(HttpStatus.BAD_REQUEST,
+                        "level=GLOBAL is not supported; use COUNTRY, REGION, or METRO");
+            default:
+                // Unknown bucket → null lets the query return all levels.
+                return null;
+        }
+    }
+
+    private static int defaultLimitFor(String geoLevel) {
+        if (geoLevel == null) return LIMIT_DEFAULT;
+        switch (geoLevel) {
+            case "COUNTRY": return LIMIT_COUNTRY;
+            case "REGION":  return LIMIT_REGION;
+            case "METRO":   return LIMIT_METRO;
+            default:        return LIMIT_DEFAULT;
+        }
+    }
+
+    private static int clampLimit(Integer requested, int fallback) {
+        int n = requested == null ? fallback : requested;
+        if (n < 1) n = 1;
+        if (n > LIMIT_HARD_CEILING) n = LIMIT_HARD_CEILING;
+        return n;
+    }
+
+    // ────────────────────────────────────────────────────────────────────
+    // Value types
+    // ────────────────────────────────────────────────────────────────────
+
+    /** Resolved time window. {@code allTime=true} means no lower bound. */
+    private record WindowSpec(boolean allTime, int legacyDays, String label) {
+        java.sql.Timestamp timestampSince() {
+            return java.sql.Timestamp.from(Instant.now().minus(legacyDays, ChronoUnit.DAYS));
+        }
+    }
+
+    /**
+     * Validated lat/lng bounding box. lat is clamped to ±89.9° to dodge
+     * pole-induced edge cases. lng is normalised to [-180, 180]; if
+     * {@code minLng > maxLng} after normalisation we treat it as an
+     * antimeridian wrap (the SQL handles both shapes).
+     */
+    private record BBox(double minLat, double maxLat, double minLng, double maxLng) {
+        static BBox maybe(Double minLat, Double maxLat, Double minLng, Double maxLng) {
+            int given = (minLat != null ? 1 : 0) + (maxLat != null ? 1 : 0)
+                      + (minLng != null ? 1 : 0) + (maxLng != null ? 1 : 0);
+            if (given == 0) return null;
+            if (given != 4
+                    || minLat == null || maxLat == null
+                    || minLng == null || maxLng == null) {
+                throw new ResponseStatusException(HttpStatus.BAD_REQUEST,
+                        "bbox requires all four of minLat/maxLat/minLng/maxLng");
+            }
+            double laMin = clampLat(Math.min(minLat.doubleValue(), maxLat.doubleValue()));
+            double laMax = clampLat(Math.max(minLat.doubleValue(), maxLat.doubleValue()));
+            double lnMin = normalizeLng(minLng.doubleValue());
+            double lnMax = normalizeLng(maxLng.doubleValue());
+            return new BBox(laMin, laMax, lnMin, lnMax);
+        }
+
+        /** Approximate area in square degrees; only used for the size guard. */
+        double area() {
+            double lat = Math.max(0.0, maxLat - minLat);
+            double lng = minLng <= maxLng
+                    ? Math.max(0.0, maxLng - minLng)
+                    // wrap: take the two halves
+                    : (180.0 - minLng) + (maxLng + 180.0);
+            return lat * lng;
+        }
+
+        private static double clampLat(double v) {
+            if (v < -89.9) return -89.9;
+            if (v > 89.9) return 89.9;
+            return v;
+        }
+
+        private static double normalizeLng(double v) {
+            double x = ((v + 180.0) % 360.0 + 360.0) % 360.0 - 180.0;
+            return x;
+        }
     }
 }
