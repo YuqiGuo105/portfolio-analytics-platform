@@ -3,6 +3,15 @@
 #
 # Do NOT bake any Aiven password into this file. Use ${VAR} interpolation
 # and require the operator to populate .env from .env.example.
+#
+# SECRETS POLICY:
+#   The `dev-*` fallbacks below (dev-salt-change-me, dev-internal-token)
+#   exist ONLY so `docker compose up` works on a fresh laptop without
+#   a .env file. They are NEVER acceptable in prod. In prod both
+#   analytics services now fail-fast when INTERNAL_API_TOKEN /
+#   NOTIFICATION_INTERNAL_TOKEN / ANALYTICS_HMAC_SALT are unset (the
+#   `application.yml` placeholders no longer carry defaults). All three
+#   MUST come from Google Secret Manager on Cloud Run.
 
 services:
   analytics-aggregator-service:

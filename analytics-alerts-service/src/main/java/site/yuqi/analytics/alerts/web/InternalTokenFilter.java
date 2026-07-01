@@ -31,10 +31,13 @@ public class InternalTokenFilter extends OncePerRequestFilter {
 
     @Override
     protected boolean shouldNotFilter(HttpServletRequest req) {
+        // Only actuator is safe to expose without auth (Cloud Run health
+        // checks need it). Swagger/openapi paths used to be bypassed too
+        // but that let anyone with the URL enumerate the API shape; those
+        // are now blocked here AND disabled entirely in the prod profile
+        // via springdoc.api-docs.enabled=false.
         String p = req.getRequestURI();
-        return p.startsWith("/actuator/")
-                || p.startsWith("/v3/api-docs")
-                || p.startsWith("/swagger-ui");
+        return p.startsWith("/actuator/");
     }
 
     @Override

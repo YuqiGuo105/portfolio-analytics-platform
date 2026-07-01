@@ -45,8 +45,25 @@ analytics:
     enabled: ${ALERTS_EVAL_ENABLED:true}
     eval-cron: "0 * * * * *"               # every minute on the second mark
     cooldown-default-seconds: 1800        # 30 minutes between repeats per rule+area
-  internal-token: ${INTERNAL_API_TOKEN:change-me}
+  # Fail-closed: no defaults. Missing envs make the app refuse to start
+  # rather than accept the string "change-me" as a real credential.
+  # Provision via Google Secret Manager in prod.
+  internal-token: ${INTERNAL_API_TOKEN}
   notification:
     base-url: ${NOTIFICATION_SERVICE_BASE_URL:http://localhost:8091}
-    internal-token: ${NOTIFICATION_INTERNAL_TOKEN:change-me}
+    internal-token: ${NOTIFICATION_INTERNAL_TOKEN}
     timeout-ms: 5000
+
+---
+# Prod profile: hide the OpenAPI surface (the InternalTokenFilter now
+# also refuses to bypass /v3/api-docs and /swagger-ui, so this is
+# defense-in-depth).
+spring:
+  config:
+    activate:
+      on-profile: prod
+springdoc:
+  api-docs:
+    enabled: false
+  swagger-ui:
+    enabled: false

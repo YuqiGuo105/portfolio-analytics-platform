@@ -82,7 +82,19 @@ analytics:
     raw: ${ANALYTICS_TOPIC_RAW:analytics.raw.events}
     dlq: ${ANALYTICS_TOPIC_DLQ:analytics.events.dlq}
   consumer-enabled: ${ANALYTICS_CONSUMER_ENABLED:true}
-  hmac-salt: ${ANALYTICS_HMAC_SALT:change-me-please}
+  # Fail-closed: no default. If ANALYTICS_HMAC_SALT is unset the app will
+  # refuse to start (Spring can't resolve the placeholder) instead of
+  # shipping a well-known salt that would let anyone reverse the visitor
+  # IP hash. Provision this via Google Secret Manager in prod.
+  hmac-salt: ${ANALYTICS_HMAC_SALT}
+  # Per-IP fixed-window rate limit for the public /api/public/* surface
+  # (see IpRateLimitFilter). Valkey-backed so limits are shared across
+  # replicas; falls open on Valkey errors.
+  public:
+    rate-limit:
+      enabled: ${PUBLIC_RATE_LIMIT_ENABLED:true}
+      max-per-window: ${PUBLIC_RATE_LIMIT_MAX:120}
+      window-seconds: ${PUBLIC_RATE_LIMIT_WINDOW_S:60}
   dedup:
     ttl-seconds: ${ANALYTICS_DEDUP_TTL_SECONDS:86400}
   backfill:
@@ -93,3 +105,16 @@ analytics:
     enabled: ${ANALYTICS_BACKFILL_ENABLED:false}
     site-id: ${ANALYTICS_SITE_ID:yuqi.site}
     batch-size: ${ANALYTICS_BACKFILL_BATCH:500}
+
+---
+# Prod profile: hide the OpenAPI surface. Anyone who happens to hit the
+# Cloud Run URL should NOT be able to enumerate the aggregator API shape.
+spring:
+  config:
+    activate:
+      on-profile: prod
+springdoc:
+  api-docs:
+    enabled: false
+  swagger-ui:
+    enabled: false
