@@ -52,7 +52,7 @@ analytics:
   notification:
     base-url: ${NOTIFICATION_SERVICE_BASE_URL:http://localhost:8091}
     internal-token: ${NOTIFICATION_INTERNAL_TOKEN}
-    timeout-ms: 5000
+    timeout-ms: ${ANALYTICS_NOTIFICATION_TIMEOUT_MS:15000}
 
 ---
 # Prod profile: hide the OpenAPI surface (the InternalTokenFilter now
