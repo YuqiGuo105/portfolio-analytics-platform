@@ -76,13 +76,22 @@ public class AlertEvaluator {
             return;
         }
 
+        String alertBody = "%s %d %s threshold %d (bucket %s)".formatted(
+                r.eventType(), count, r.comparator(), r.threshold(), bucket);
         boolean ok = sender.send(Map.of(
+                "eventType", "FEATURE_RELEASED",
+                "topic", "FEATURE_UPDATES",
                 "title", "Alert: " + r.name(),
-                "body", "%s %d %s threshold %d (bucket %s)".formatted(
-                        r.eventType(), count, r.comparator(), r.threshold(), bucket),
-                "siteId", r.siteId(),
-                "ruleId", r.ruleId(),
-                "geoAreaId", r.geoAreaId() == null ? "" : r.geoAreaId()));
+                "summary", alertBody,
+                "sourceType", "ALERT",
+                "sourceId", String.valueOf(r.ruleId()),
+                "idempotencyKey", dedupKey,
+                "metadata", Map.of(
+                        "siteId", r.siteId(),
+                        "ruleId", r.ruleId(),
+                        "geoAreaId", r.geoAreaId() == null ? "" : r.geoAreaId(),
+                        "measuredValue", count,
+                        "threshold", r.threshold())));
 
         if (ok) {
             jdbc.update("update incidents set notified = true, notified_at = now() where dedup_key = ?", dedupKey);
