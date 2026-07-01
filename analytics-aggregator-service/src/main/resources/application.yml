@@ -95,6 +95,9 @@ analytics:
       enabled: ${PUBLIC_RATE_LIMIT_ENABLED:true}
       max-per-window: ${PUBLIC_RATE_LIMIT_MAX:120}
       window-seconds: ${PUBLIC_RATE_LIMIT_WINDOW_S:60}
+    cache:
+      enabled: ${PUBLIC_CACHE_ENABLED:true}
+      ttl-seconds: ${PUBLIC_CACHE_TTL_SECONDS:30}
   dedup:
     ttl-seconds: ${ANALYTICS_DEDUP_TTL_SECONDS:86400}
   backfill:

@@ -3,9 +3,11 @@ package site.yuqi.analytics.aggregator.web;
 import lombok.RequiredArgsConstructor;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.http.HttpStatus;
+import org.springframework.http.ResponseEntity;
 import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.web.bind.annotation.CrossOrigin;
 import org.springframework.web.bind.annotation.GetMapping;
+import org.springframework.web.bind.annotation.RequestHeader;
 import org.springframework.web.bind.annotation.RequestMapping;
 import org.springframework.web.bind.annotation.RequestParam;
 import org.springframework.web.bind.annotation.RestController;
@@ -60,6 +62,7 @@ public class PublicVisitsController {
     private static final double MAX_BBOX_AREA_ALL = 32_400.0;
 
     private final JdbcTemplate jdbc;
+    private final ResponseCache cache;
 
     @Value("${analytics.backfill.site-id:yuqi.site}")
     private String siteId;
@@ -95,7 +98,7 @@ public class PublicVisitsController {
      * @param limit   server-side row cap; defaults to a per-level cap if omitted.
      */
     @GetMapping("/visits/markers")
-    public List<Map<String, Object>> markers(
+    public ResponseEntity<?> markers(
             @RequestParam(value = "window", required = false) String window,
             @RequestParam(value = "days", required = false) Integer days,
             @RequestParam(value = "level", required = false) String level,
@@ -103,7 +106,8 @@ public class PublicVisitsController {
             @RequestParam(value = "latMax", required = false) Double latMax,
             @RequestParam(value = "lngMin", required = false) Double lngMin,
             @RequestParam(value = "lngMax", required = false) Double lngMax,
-            @RequestParam(value = "limit", required = false) Integer limit) {
+            @RequestParam(value = "limit", required = false) Integer limit,
+            @RequestHeader(value = "If-None-Match", required = false) String ifNoneMatch) {
 
         WindowSpec ws = resolveWindow(window, days);
         String geoLevel = normalizeLevel(level);
@@ -115,7 +119,22 @@ public class PublicVisitsController {
         }
 
         int boundedLimit = clampLimit(limit, defaultLimitFor(geoLevel));
-        return runMarkersQuery(ws, geoLevel, bbox, boundedLimit);
+
+        String cacheKey = "pub:markers:" + ws.label + ":" + geoLevel + ":" + boundedLimit
+                + (bbox != null ? ":" + bbox.minLat + ":" + bbox.maxLat + ":" + bbox.minLng + ":" + bbox.maxLng : "");
+
+        ResponseCache.CacheEntry hit = cache.get(cacheKey);
+        if (hit != null) {
+            if (hit.etag().equals(ifNoneMatch)) {
+                return ResponseEntity.status(HttpStatus.NOT_MODIFIED).eTag(hit.etag()).build();
+            }
+            return ResponseEntity.ok().eTag(hit.etag())
+                    .header("Content-Type", "application/json").body(hit.json());
+        }
+
+        List<Map<String, Object>> result = runMarkersQuery(ws, geoLevel, bbox, boundedLimit);
+        String etag = cache.put(cacheKey, result);
+        return ResponseEntity.ok().eTag(etag).body(result);
     }
 
     /**
@@ -125,7 +144,7 @@ public class PublicVisitsController {
      * — this thin wrapper delegates to the same query path.
      */
     @GetMapping("/visits/markers/area")
-    public List<Map<String, Object>> markersInArea(
+    public ResponseEntity<?> markersInArea(
             @RequestParam(value = "window", required = false) String window,
             @RequestParam(value = "days", required = false) Integer days,
             @RequestParam("latMin") double latMin,
@@ -133,8 +152,9 @@ public class PublicVisitsController {
             @RequestParam("lngMin") double lngMin,
             @RequestParam("lngMax") double lngMax,
             @RequestParam(value = "level", required = false) String level,
-            @RequestParam(value = "limit", required = false) Integer limit) {
-        return markers(window, days, level, latMin, latMax, lngMin, lngMax, limit);
+            @RequestParam(value = "limit", required = false) Integer limit,
+            @RequestHeader(value = "If-None-Match", required = false) String ifNoneMatch) {
+        return markers(window, days, level, latMin, latMax, lngMin, lngMax, limit, ifNoneMatch);
     }
 
     /**
@@ -147,11 +167,23 @@ public class PublicVisitsController {
      * </ul>
      */
     @GetMapping("/visits/summary")
-    public Map<String, Object> summary(
+    public ResponseEntity<?> summary(
             @RequestParam(value = "window", required = false) String window,
-            @RequestParam(value = "days", required = false) Integer days) {
+            @RequestParam(value = "days", required = false) Integer days,
+            @RequestHeader(value = "If-None-Match", required = false) String ifNoneMatch) {
 
         WindowSpec ws = resolveWindow(window, days);
+        String cacheKey = "pub:summary:" + ws.label;
+
+        ResponseCache.CacheEntry hit = cache.get(cacheKey);
+        if (hit != null) {
+            if (hit.etag().equals(ifNoneMatch)) {
+                return ResponseEntity.status(HttpStatus.NOT_MODIFIED).eTag(hit.etag()).build();
+            }
+            return ResponseEntity.ok().eTag(hit.etag())
+                    .header("Content-Type", "application/json").body(hit.json());
+        }
+
         String timeFilter = ws.allTime ? "" : "  and bucket_time >= ? ";
         Object[] base = ws.allTime ? new Object[]{siteId} : new Object[]{siteId, ws.timestampSince()};
 
@@ -184,7 +216,7 @@ public class PublicVisitsController {
                 "group by bucket_time order by bucket_time",
                 base);
 
-        return Map.of(
+        Map<String, Object> result = Map.of(
                 "siteId", siteId,
                 "window", ws.label,
                 "days", ws.legacyDays,
@@ -192,6 +224,9 @@ public class PublicVisitsController {
                 "topCountries", topCountries,
                 "topDevices", topDevices,
                 "timeSeries", timeSeries);
+
+        String etag = cache.put(cacheKey, result);
+        return ResponseEntity.ok().eTag(etag).body(result);
     }
 
     // ────────────────────────────────────────────────────────────────────
