@@ -53,6 +53,7 @@ public class RollupUpsertService {
             """;
 
     private final JdbcTemplate jdbc;
+    private final UniqueSessionCounter sessionCounter;
 
     // ------------------------------------------------------------------ single
 
@@ -61,8 +62,11 @@ public class RollupUpsertService {
     public void upsert(EnrichedEvent e) {
         Objects.requireNonNull(e, "enriched event must not be null");
         Instant ts = e.eventTime() == null ? Instant.now() : e.eventTime();
-        upsertAtGranularity(e, ts, Granularity.FIVE_MIN, 1L, 1L);
-        upsertAtGranularity(e, ts, Granularity.ONE_DAY,  1L, 1L);
+        String sessionKey = resolveSessionKey(e);
+        long sess5m = hllDelta(e, Granularity.FIVE_MIN, ts, sessionKey);
+        long sess1d = hllDelta(e, Granularity.ONE_DAY,  ts, sessionKey);
+        upsertAtGranularity(e, ts, Granularity.FIVE_MIN, 1L, sess5m);
+        upsertAtGranularity(e, ts, Granularity.ONE_DAY,  1L, sess1d);
     }
 
     // ------------------------------------------------------------------ batch
@@ -100,7 +104,11 @@ public class RollupUpsertService {
         RollupKey key = keyFor(e, g, ts);
         long[] counts = acc.computeIfAbsent(key, k -> new long[]{0L, 0L});
         counts[0] += 1; // event_count
-        counts[1] += 1; // unique_sessions
+        // HLL delta: 0 if this session was already counted in this bucket, 1 if new.
+        String sessionKey = resolveSessionKey(e);
+        counts[1] += sessionCounter.addAndDelta(
+                key.siteId, key.granularity, key.bucketTime.toInstant().getEpochSecond(),
+                key.geoLevel, key.geoAreaId, key.eventType, sessionKey);
     }
 
     private void flushGranularity(Map<RollupKey, long[]> acc, Granularity g) {
@@ -145,6 +153,20 @@ public class RollupUpsertService {
                 e.bot(),
                 e.geo() == null || e.geo().country() == null ? "" : e.geo().country()
         );
+    }
+
+    private long hllDelta(EnrichedEvent e, Granularity g, Instant ts, String sessionKey) {
+        RollupKey key = keyFor(e, g, ts);
+        return sessionCounter.addAndDelta(
+                key.siteId, key.granularity, key.bucketTime.toInstant().getEpochSecond(),
+                key.geoLevel, key.geoAreaId, key.eventType, sessionKey);
+    }
+
+    /** Resolve the best session identity: sessionId > anonId > ipHash. */
+    private static String resolveSessionKey(EnrichedEvent e) {
+        if (e.sessionId() != null && !e.sessionId().isBlank()) return e.sessionId();
+        if (e.anonId() != null && !e.anonId().isBlank()) return e.anonId();
+        return e.ipHash();
     }
 
     private static String nz(String s) {

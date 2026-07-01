@@ -14,6 +14,7 @@ import java.util.List;
 
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.ArgumentMatchers.anyLong;
 import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.mock;
@@ -30,13 +31,18 @@ import static org.mockito.Mockito.when;
 class RollupUpsertServiceTest {
 
     private JdbcTemplate jdbc;
+    private UniqueSessionCounter sessionCounter;
     private RollupUpsertService svc;
 
     @BeforeEach
     void setUp() {
         jdbc = mock(JdbcTemplate.class);
+        sessionCounter = mock(UniqueSessionCounter.class);
         when(jdbc.update(anyString(), (Object[]) any())).thenReturn(1);
-        svc = new RollupUpsertService(jdbc);
+        // Default: every session is unique (delta=1), matching old behaviour.
+        when(sessionCounter.addAndDelta(anyString(), anyString(), anyLong(),
+                anyString(), anyString(), anyString(), anyString())).thenReturn(1L);
+        svc = new RollupUpsertService(jdbc, sessionCounter);
     }
 
     @Test
@@ -179,5 +185,78 @@ class RollupUpsertServiceTest {
         svc.upsertBatch(List.of());
         verify(jdbc, times(0)).batchUpdate(anyString(), any(List.class));
         verify(jdbc, times(0)).update(anyString(), (Object[]) any());
+    }
+
+    // ---------------------------------------------------------------- HLL session tests
+
+    @Test
+    void sameSessionInBatchProducesUniqueSessionsOne() {
+        // Two events with the SAME sessionId in one batch → unique_sessions should be 1.
+        Instant ts = Instant.parse("2026-06-23T12:03:00Z");
+
+        // First call returns 1 (new session), second returns 0 (already seen).
+        java.util.concurrent.atomic.AtomicInteger callCount = new java.util.concurrent.atomic.AtomicInteger(0);
+        when(sessionCounter.addAndDelta(anyString(), anyString(), anyLong(),
+                anyString(), anyString(), anyString(), eq("sess-1")))
+                .thenAnswer(inv -> callCount.incrementAndGet() == 1 ? 1L : 0L);
+
+        List<EnrichedEvent> batch = List.of(
+                sampleEvent("e1", ts),
+                sampleEvent("e2", ts.plusSeconds(30))
+        );
+
+        svc.upsertBatch(batch);
+
+        ArgumentCaptor<List<Object[]>> rowsCaptor = ArgumentCaptor.forClass(List.class);
+        verify(jdbc, times(2)).batchUpdate(anyString(), rowsCaptor.capture());
+
+        Object[] fiveMinRow = rowsCaptor.getAllValues().get(0).get(0);
+        assertThat(fiveMinRow[fiveMinRow.length - 2]).isEqualTo(2L); // event_count=2
+        assertThat(fiveMinRow[fiveMinRow.length - 1]).isEqualTo(1L); // unique_sessions=1
+    }
+
+    @Test
+    void differentSessionsInBatchProducesCorrectUniqueSessions() {
+        // Two events with DIFFERENT sessionIds → unique_sessions should be 2.
+        Instant ts = Instant.parse("2026-06-23T12:03:00Z");
+
+        // Both calls return 1 (each is a new session).
+        when(sessionCounter.addAndDelta(anyString(), anyString(), anyLong(),
+                anyString(), anyString(), anyString(), anyString())).thenReturn(1L);
+
+        EnrichedEvent e1 = sampleEvent("e1", ts);
+        EnrichedEvent e2 = new EnrichedEvent(
+                "e2", "yuqi.site", "page_view",
+                ts, ts.plusMillis(50),
+                "sess-2", "anon-1", "/", null, null,
+                "desktop", "Chrome", "macOS", false, 0.0,
+                "hash",
+                new EnrichedGeo(GeoLevel.METRO, "METRO:US:UT:Salt Lake City", "US", "UT", "Salt Lake City"));
+
+        svc.upsertBatch(List.of(e1, e2));
+
+        ArgumentCaptor<List<Object[]>> rowsCaptor = ArgumentCaptor.forClass(List.class);
+        verify(jdbc, times(2)).batchUpdate(anyString(), rowsCaptor.capture());
+
+        Object[] fiveMinRow = rowsCaptor.getAllValues().get(0).get(0);
+        assertThat(fiveMinRow[fiveMinRow.length - 2]).isEqualTo(2L); // event_count=2
+        assertThat(fiveMinRow[fiveMinRow.length - 1]).isEqualTo(2L); // unique_sessions=2
+    }
+
+    @Test
+    void hllFailureYieldsZeroUniqueSessions() {
+        // When HLL fails (returns 0), unique_sessions should be 0 (fail-open).
+        when(sessionCounter.addAndDelta(anyString(), anyString(), anyLong(),
+                anyString(), anyString(), anyString(), anyString())).thenReturn(0L);
+
+        Instant ts = Instant.parse("2026-06-23T12:03:00Z");
+        svc.upsertBatch(List.of(sampleEvent("e1", ts)));
+
+        ArgumentCaptor<List<Object[]>> rowsCaptor = ArgumentCaptor.forClass(List.class);
+        verify(jdbc, times(2)).batchUpdate(anyString(), rowsCaptor.capture());
+
+        Object[] fiveMinRow = rowsCaptor.getAllValues().get(0).get(0);
+        assertThat(fiveMinRow[fiveMinRow.length - 2]).isEqualTo(1L); // event_count=1
+        assertThat(fiveMinRow[fiveMinRow.length - 1]).isEqualTo(0L); // unique_sessions=0 (fail-open)
     }
 }
