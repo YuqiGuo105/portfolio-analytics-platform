@@ -114,15 +114,17 @@ public class RawEventConsumer {
         }
 
         try {
-            // Phase 2: raw source-of-truth first. If this throws we do NOT
-            // ack, Kafka replays the batch, and the ON CONFLICT (event_id)
-            // DO NOTHING clause absorbs the retry without duplicates.
-            visitorLogs.persistBatch(rawEvents);
-            // Phase 3: aggregated rollups. Same at-least-once contract —
-            // upstream dedup blocks a replayed event from being counted twice.
+            // Phase 2: visitor_logs raw audit (best-effort — failure here
+            // must NOT block the analytics-critical rollup + session path).
+            try {
+                visitorLogs.persistBatch(rawEvents);
+            } catch (RuntimeException vlErr) {
+                log.warn("{\"event\":\"visitor_logs_failed\",\"batchSize\":{},\"err\":\"{}\"}",
+                        rawEvents.size(), vlErr.getMessage());
+            }
+            // Phase 3: aggregated rollups — the critical path.
             rollup.upsertBatch(enriched);
-            // Phase 3.5: session aggregation (best-effort — failure here
-            // must NOT block acknowledgement since rollups already committed).
+            // Phase 3.5: session aggregation (best-effort).
             try {
                 sessions.processBatch(enriched);
             } catch (RuntimeException sessionErr) {

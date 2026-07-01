@@ -185,7 +185,7 @@ class RawEventConsumerTest {
     }
 
     @Test
-    void batchPersistFailureLeavesUnackedAndSkipsRollup() {
+    void visitorLogsFailureDoesNotBlockRollupOrAck() {
         EnrichedEvent enriched = sampleEnriched();
         RawEvent raw = sampleRaw(enriched.eventId());
         doAnswer(inv -> {
@@ -200,10 +200,10 @@ class RawEventConsumerTest {
         Acknowledgment ack = mock(Acknowledgment.class);
         consumer.onMessage(List.of(record("k", "{}", 1L)), ack);
 
+        // visitor_logs is best-effort — failure does NOT block rollup or ack
         verify(visitorLogs, times(1)).persistBatch(anyList());
-        verify(rollup,      never()).upsertBatch(anyList());
-        verify(ack,         never()).acknowledge();
-        verify(dlq,         never()).publish(any(), any(), any());
+        verify(rollup,      times(1)).upsertBatch(anyList());
+        verify(ack,         times(1)).acknowledge();
     }
 
     @Test
