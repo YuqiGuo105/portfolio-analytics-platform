@@ -230,6 +230,91 @@ public class PublicVisitsController {
     }
 
     // ────────────────────────────────────────────────────────────────────
+    // Session + funnel endpoints
+    // ────────────────────────────────────────────────────────────────────
+
+    /**
+     * Session stats: total sessions, avg duration, bounce rate.
+     */
+    @GetMapping("/visits/sessions")
+    public ResponseEntity<?> sessionStats(
+            @RequestParam(value = "window", required = false) String window,
+            @RequestParam(value = "days", required = false) Integer days,
+            @RequestHeader(value = "If-None-Match", required = false) String ifNoneMatch) {
+
+        WindowSpec ws = resolveWindow(window, days);
+        String cacheKey = "pub:sessions:" + ws.label;
+
+        ResponseCache.CacheEntry hit = cache.get(cacheKey);
+        if (hit != null) {
+            if (hit.etag().equals(ifNoneMatch)) {
+                return ResponseEntity.status(HttpStatus.NOT_MODIFIED).eTag(hit.etag()).build();
+            }
+            return ResponseEntity.ok().eTag(hit.etag())
+                    .header("Content-Type", "application/json").body(hit.json());
+        }
+
+        String timeFilter = ws.allTime ? "" : " AND first_event >= ? ";
+        Object[] params = ws.allTime ? new Object[]{siteId} : new Object[]{siteId, ws.timestampSince()};
+
+        Map<String, Object> stats = jdbc.queryForMap(
+                "SELECT count(*) as \"totalSessions\", " +
+                "       coalesce(avg(duration_ms), 0) as \"avgDurationMs\", " +
+                "       coalesce(sum(CASE WHEN page_views <= 1 THEN 1 ELSE 0 END)::float / " +
+                "         NULLIF(count(*), 0), 0) as \"bounceRate\" " +
+                "FROM public.sessions WHERE site_id = ?" + timeFilter, params);
+
+        List<Map<String, Object>> topEntry = jdbc.queryForList(
+                "SELECT entry_page as \"page\", count(*) as \"count\" " +
+                "FROM public.sessions WHERE site_id = ?" + timeFilter +
+                " AND entry_page IS NOT NULL " +
+                "GROUP BY entry_page ORDER BY count(*) DESC LIMIT 10", params);
+
+        Map<String, Object> result = Map.of(
+                "stats", stats,
+                "topEntryPages", topEntry,
+                "window", ws.label);
+
+        String etag = cache.put(cacheKey, result);
+        return ResponseEntity.ok().eTag(etag).body(result);
+    }
+
+    /**
+     * Funnel analysis: step-by-step conversion counts.
+     */
+    @GetMapping("/visits/funnel")
+    public ResponseEntity<?> funnel(
+            @RequestParam(value = "window", required = false) String window,
+            @RequestParam(value = "days", required = false) Integer days,
+            @RequestHeader(value = "If-None-Match", required = false) String ifNoneMatch) {
+
+        WindowSpec ws = resolveWindow(window, days);
+        String cacheKey = "pub:funnel:" + ws.label;
+
+        ResponseCache.CacheEntry hit = cache.get(cacheKey);
+        if (hit != null) {
+            if (hit.etag().equals(ifNoneMatch)) {
+                return ResponseEntity.status(HttpStatus.NOT_MODIFIED).eTag(hit.etag()).build();
+            }
+            return ResponseEntity.ok().eTag(hit.etag())
+                    .header("Content-Type", "application/json").body(hit.json());
+        }
+
+        String timeFilter = ws.allTime ? "" : " AND event_time >= ? ";
+        Object[] params = ws.allTime ? new Object[]{siteId} : new Object[]{siteId, ws.timestampSince()};
+
+        List<Map<String, Object>> steps = jdbc.queryForList(
+                "SELECT step_name as \"step\", count(DISTINCT session_id) as \"sessions\" " +
+                "FROM public.funnel_steps WHERE site_id = ?" + timeFilter +
+                " GROUP BY step_name ORDER BY count(DISTINCT session_id) DESC LIMIT 20", params);
+
+        Map<String, Object> result = Map.of("steps", steps, "window", ws.label);
+
+        String etag = cache.put(cacheKey, result);
+        return ResponseEntity.ok().eTag(etag).body(result);
+    }
+
+    // ────────────────────────────────────────────────────────────────────
     // Query implementation
     // ────────────────────────────────────────────────────────────────────
 

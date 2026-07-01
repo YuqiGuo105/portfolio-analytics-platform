@@ -8,6 +8,7 @@ import org.springframework.kafka.support.Acknowledgment;
 import org.springframework.stereotype.Component;
 import site.yuqi.analytics.aggregator.enrich.EnrichmentPipeline;
 import site.yuqi.analytics.aggregator.service.RollupUpsertService;
+import site.yuqi.analytics.aggregator.service.SessionAggregatorService;
 import site.yuqi.analytics.aggregator.service.VisitorLogPersistService;
 import site.yuqi.analytics.common.event.EnrichedEvent;
 import site.yuqi.analytics.common.event.RawEvent;
@@ -58,6 +59,7 @@ public class RawEventConsumer {
 
     private final EnrichmentPipeline pipeline;
     private final RollupUpsertService rollup;
+    private final SessionAggregatorService sessions;
     private final VisitorLogPersistService visitorLogs;
     private final DlqProducer dlq;
 
@@ -119,6 +121,14 @@ public class RawEventConsumer {
             // Phase 3: aggregated rollups. Same at-least-once contract —
             // upstream dedup blocks a replayed event from being counted twice.
             rollup.upsertBatch(enriched);
+            // Phase 3.5: session aggregation (best-effort — failure here
+            // must NOT block acknowledgement since rollups already committed).
+            try {
+                sessions.processBatch(enriched);
+            } catch (RuntimeException sessionErr) {
+                log.warn("{\"event\":\"session_batch_failed\",\"batchSize\":{},\"err\":\"{}\"}",
+                        enriched.size(), sessionErr.getMessage());
+            }
             // Phase 4: single ack for the entire poll.
             ack.acknowledge();
         } catch (RuntimeException dbErr) {

@@ -6,6 +6,7 @@ import org.junit.jupiter.api.Test;
 import org.springframework.kafka.support.Acknowledgment;
 import site.yuqi.analytics.aggregator.enrich.EnrichmentPipeline;
 import site.yuqi.analytics.aggregator.service.RollupUpsertService;
+import site.yuqi.analytics.aggregator.service.SessionAggregatorService;
 import site.yuqi.analytics.aggregator.service.VisitorLogPersistService;
 import site.yuqi.analytics.common.event.EnrichedEvent;
 import site.yuqi.analytics.common.event.EnrichedGeo;
@@ -44,6 +45,7 @@ class RawEventConsumerTest {
 
     private EnrichmentPipeline pipeline;
     private RollupUpsertService rollup;
+    private SessionAggregatorService sessions;
     private VisitorLogPersistService visitorLogs;
     private DlqProducer dlq;
     private RawEventConsumer consumer;
@@ -52,9 +54,10 @@ class RawEventConsumerTest {
     void setUp() {
         pipeline = mock(EnrichmentPipeline.class);
         rollup = mock(RollupUpsertService.class);
+        sessions = mock(SessionAggregatorService.class);
         visitorLogs = mock(VisitorLogPersistService.class);
         dlq = mock(DlqProducer.class);
-        consumer = new RawEventConsumer(pipeline, rollup, visitorLogs, dlq);
+        consumer = new RawEventConsumer(pipeline, rollup, sessions, visitorLogs, dlq);
     }
 
     @Test
