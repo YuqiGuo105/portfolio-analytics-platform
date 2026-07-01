@@ -8,7 +8,9 @@ import org.springframework.kafka.support.Acknowledgment;
 import org.springframework.stereotype.Component;
 import site.yuqi.analytics.aggregator.enrich.EnrichmentPipeline;
 import site.yuqi.analytics.aggregator.service.RollupUpsertService;
+import site.yuqi.analytics.aggregator.service.VisitorLogPersistService;
 import site.yuqi.analytics.common.event.EnrichedEvent;
+import site.yuqi.analytics.common.event.RawEvent;
 import site.yuqi.analytics.common.kafka.DlqProducer;
 import site.yuqi.analytics.common.kafka.Outcome;
 
@@ -19,18 +21,31 @@ import java.util.List;
  * Batch Kafka listener for {@code analytics.raw.events}.
  *
  * <p>Each poll delivers up to {@code max.poll.records} (100) records.
- * The batch is processed in three phases:
+ * The batch is processed in four phases:
  * <ol>
  *   <li>Parse + enrich every record. Parse failures → DLQ immediately.
- *       Dedup hits and empty payloads are silently dropped.</li>
- *   <li>Hand the successfully-enriched records to
- *       {@link RollupUpsertService#upsertBatch} which pre-aggregates
- *       in memory and fires a single {@code jdbc.batchUpdate} — one
- *       round-trip to Postgres per Kafka poll instead of N×2.</li>
- *   <li>Acknowledge the whole batch once the DB write succeeds. If the
- *       DB write throws, the batch is left un-acked so Kafka re-delivers
- *       it (at-least-once). The upstream UUIDv7 dedup key keeps the
- *       re-processed records idempotent.</li>
+ *       Dedup hits and empty payloads are silently dropped. Both the
+ *       {@link EnrichedEvent} <b>and</b> the parsed {@link RawEvent}
+ *       are collected — the raw form is required to write the raw
+ *       source-of-truth row into {@code visitor_logs} before enrichment
+ *       discards {@code ipRaw} and coarsens the geo hint.</li>
+ *   <li>Persist raw events into {@code visitor_logs} via
+ *       {@link VisitorLogPersistService#persistBatch} — one
+ *       {@code jdbc.batchUpdate} per poll, idempotent via
+ *       {@code ON CONFLICT (event_id) DO NOTHING}. This replaces the
+ *       per-request write the Portfolio /api/track endpoint used to do
+ *       against Supabase.</li>
+ *   <li>Upsert the enriched batch into {@code geo_time_rollups} via
+ *       {@link RollupUpsertService#upsertBatch}.</li>
+ *   <li>Acknowledge only after BOTH writes succeed. If either throws,
+ *       leave the batch un-acked so Kafka re-delivers it. Idempotency:
+ *       visitor_logs is guarded by the ON CONFLICT DO NOTHING on
+ *       event_id (partial unique index added in V6); rollups are
+ *       guarded by the upstream UUIDv7 dedup key in
+ *       {@link EnrichmentPipeline#parseAndEnrich} — a redelivered
+ *       event fails the {@code DedupService.acquire} check and is
+ *       dropped before it reaches the rollup batch, so counters never
+ *       double-count.</li>
  * </ol>
  *
  * <p>The previous single-record listener is preserved as {@link #process}
@@ -43,6 +58,7 @@ public class RawEventConsumer {
 
     private final EnrichmentPipeline pipeline;
     private final RollupUpsertService rollup;
+    private final VisitorLogPersistService visitorLogs;
     private final DlqProducer dlq;
 
     @KafkaListener(
@@ -57,6 +73,11 @@ public class RawEventConsumer {
         }
 
         List<EnrichedEvent> enriched = new ArrayList<>(records.size());
+        // Parallel list of raw events for the visitor_logs batch insert.
+        // Order does not need to match `enriched` — the two tables are
+        // independent — but both lists are populated from the same
+        // successful-parse iterations so they stay in lockstep in practice.
+        List<RawEvent> rawEvents = new ArrayList<>(records.size());
 
         for (ConsumerRecord<String, String> rec : records) {
             EnrichmentPipeline.ParseResult pr = new EnrichmentPipeline.ParseResult();
@@ -82,6 +103,7 @@ public class RawEventConsumer {
                 continue;
             }
             enriched.add(ev);
+            if (pr.rawEvent != null) rawEvents.add(pr.rawEvent);
         }
 
         if (enriched.isEmpty()) {
@@ -90,10 +112,17 @@ public class RawEventConsumer {
         }
 
         try {
+            // Phase 2: raw source-of-truth first. If this throws we do NOT
+            // ack, Kafka replays the batch, and the ON CONFLICT (event_id)
+            // DO NOTHING clause absorbs the retry without duplicates.
+            visitorLogs.persistBatch(rawEvents);
+            // Phase 3: aggregated rollups. Same at-least-once contract —
+            // upstream dedup blocks a replayed event from being counted twice.
             rollup.upsertBatch(enriched);
+            // Phase 4: single ack for the entire poll.
             ack.acknowledge();
         } catch (RuntimeException dbErr) {
-            log.warn("{\"event\":\"batch_upsert_failed\",\"batchSize\":{},\"err\":\"{}\"}",
+            log.warn("{\"event\":\"batch_persist_failed\",\"batchSize\":{},\"err\":\"{}\"}",
                     enriched.size(), dbErr.getMessage());
             // Do NOT ack — let Kafka re-deliver the whole batch.
         }
@@ -132,3 +161,4 @@ public class RawEventConsumer {
         }
     }
 }
+

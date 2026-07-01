@@ -63,6 +63,10 @@ public class EnrichmentPipeline {
             outResult.duplicate = true;
             return null;
         }
+        // Expose the parsed RawEvent so downstream callers (e.g. the batch
+        // consumer that now writes visitor_logs) can persist the raw
+        // source-of-truth row without re-parsing the JSON.
+        outResult.rawEvent = raw;
         return enrich(raw);
     }
 
@@ -99,11 +103,21 @@ public class EnrichmentPipeline {
         public String eventId;
         public String parseError;
         public boolean duplicate;
+        /**
+         * The parsed {@link RawEvent} — populated on successful parse+dedup
+         * (i.e. the same code path that returns a non-null EnrichedEvent).
+         * Left null on parse errors, missing-field failures, and dedup hits.
+         * Consumers use this to persist visitor_logs before enrichment
+         * discards the raw ip / geo lat-lng.
+         */
+        public RawEvent rawEvent;
 
         void reset() {
             this.eventId = null;
             this.parseError = null;
             this.duplicate = false;
+            this.rawEvent = null;
         }
     }
 }
+

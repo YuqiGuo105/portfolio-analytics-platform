@@ -6,11 +6,16 @@ import org.junit.jupiter.api.Test;
 import org.springframework.kafka.support.Acknowledgment;
 import site.yuqi.analytics.aggregator.enrich.EnrichmentPipeline;
 import site.yuqi.analytics.aggregator.service.RollupUpsertService;
+import site.yuqi.analytics.aggregator.service.VisitorLogPersistService;
 import site.yuqi.analytics.common.event.EnrichedEvent;
 import site.yuqi.analytics.common.event.EnrichedGeo;
+import site.yuqi.analytics.common.event.GeoHint;
 import site.yuqi.analytics.common.event.GeoLevel;
+import site.yuqi.analytics.common.event.RawEvent;
 import site.yuqi.analytics.common.kafka.DlqProducer;
 import site.yuqi.analytics.common.kafka.Outcome;
+
+import org.mockito.InOrder;
 
 import java.time.Instant;
 import java.util.List;
@@ -23,6 +28,7 @@ import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.doAnswer;
 import static org.mockito.Mockito.doNothing;
 import static org.mockito.Mockito.doThrow;
+import static org.mockito.Mockito.inOrder;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.times;
@@ -38,6 +44,7 @@ class RawEventConsumerTest {
 
     private EnrichmentPipeline pipeline;
     private RollupUpsertService rollup;
+    private VisitorLogPersistService visitorLogs;
     private DlqProducer dlq;
     private RawEventConsumer consumer;
 
@@ -45,8 +52,9 @@ class RawEventConsumerTest {
     void setUp() {
         pipeline = mock(EnrichmentPipeline.class);
         rollup = mock(RollupUpsertService.class);
+        visitorLogs = mock(VisitorLogPersistService.class);
         dlq = mock(DlqProducer.class);
-        consumer = new RawEventConsumer(pipeline, rollup, dlq);
+        consumer = new RawEventConsumer(pipeline, rollup, visitorLogs, dlq);
     }
 
     @Test
@@ -135,29 +143,70 @@ class RawEventConsumerTest {
                 new EnrichedGeo(GeoLevel.COUNTRY, "COUNTRY:US", "US", null, null));
     }
 
+    private static RawEvent sampleRaw(String eventId) {
+        return new RawEvent(
+                eventId, "yuqi.site", "page_view",
+                Instant.parse("2025-01-01T00:00:00Z"),
+                Instant.parse("2025-01-01T00:00:01Z"),
+                null, null, "/", null, null,
+                "Mozilla/5.0", "1.2.3.4",
+                new GeoHint("US", "CA", "SF", 37.77, -122.41, "vercel"));
+    }
+
     // ---------------------------------------------------------------- batch listener
 
     @Test
-    void batchHappyPathCallsUpsertBatchAndAcks() {
+    void batchHappyPathCallsPersistThenUpsertBatchAndAcks() {
         EnrichedEvent enriched = sampleEnriched();
+        RawEvent raw = sampleRaw(enriched.eventId());
         doAnswer(inv -> {
             EnrichmentPipeline.ParseResult pr = inv.getArgument(1);
             pr.eventId = enriched.eventId();
+            pr.rawEvent = raw;
             return enriched;
         }).when(pipeline).parseAndEnrich(anyString(), any(EnrichmentPipeline.ParseResult.class));
+        doNothing().when(visitorLogs).persistBatch(anyList());
         doNothing().when(rollup).upsertBatch(anyList());
 
         Acknowledgment ack = mock(Acknowledgment.class);
         consumer.onMessage(List.of(record("k1", "{\"x\":1}", 0L)), ack);
 
-        verify(rollup, times(1)).upsertBatch(anyList());
-        verify(ack,    times(1)).acknowledge();
-        verify(dlq,    never()).publish(any(), any(), any());
+        // Persist must happen before rollup so that a rollup failure leaves
+        // visitor_logs already written (idempotent via ON CONFLICT); a
+        // persist failure leaves rollup untouched.
+        InOrder inOrder = inOrder(visitorLogs, rollup, ack);
+        inOrder.verify(visitorLogs).persistBatch(anyList());
+        inOrder.verify(rollup).upsertBatch(anyList());
+        inOrder.verify(ack).acknowledge();
+        verify(dlq, never()).publish(any(), any(), any());
+    }
+
+    @Test
+    void batchPersistFailureLeavesUnackedAndSkipsRollup() {
+        EnrichedEvent enriched = sampleEnriched();
+        RawEvent raw = sampleRaw(enriched.eventId());
+        doAnswer(inv -> {
+            EnrichmentPipeline.ParseResult pr = inv.getArgument(1);
+            pr.eventId = enriched.eventId();
+            pr.rawEvent = raw;
+            return enriched;
+        }).when(pipeline).parseAndEnrich(anyString(), any(EnrichmentPipeline.ParseResult.class));
+        doThrow(new RuntimeException("visitor_logs write failed"))
+                .when(visitorLogs).persistBatch(anyList());
+
+        Acknowledgment ack = mock(Acknowledgment.class);
+        consumer.onMessage(List.of(record("k", "{}", 1L)), ack);
+
+        verify(visitorLogs, times(1)).persistBatch(anyList());
+        verify(rollup,      never()).upsertBatch(anyList());
+        verify(ack,         never()).acknowledge();
+        verify(dlq,         never()).publish(any(), any(), any());
     }
 
     @Test
     void batchParseFailureGoesToDlqAndStillAcksGoodRecords() {
         EnrichedEvent good = sampleEnriched();
+        RawEvent goodRaw = sampleRaw(good.eventId());
         doAnswer(inv -> {
             EnrichmentPipeline.ParseResult pr = inv.getArgument(1);
             String value = inv.getArgument(0);
@@ -166,6 +215,7 @@ class RawEventConsumerTest {
                 return null;
             }
             pr.eventId = good.eventId();
+            pr.rawEvent = goodRaw;
             return good;
         }).when(pipeline).parseAndEnrich(anyString(), any(EnrichmentPipeline.ParseResult.class));
 
@@ -175,19 +225,23 @@ class RawEventConsumerTest {
                 record("kbad",  "bad", 11L)
         ), ack);
 
-        verify(dlq,    times(1)).publish(eq("kbad"), eq("bad"), anyString());
-        verify(rollup, times(1)).upsertBatch(anyList());  // good record still processed
-        verify(ack,    times(1)).acknowledge();
+        verify(dlq,         times(1)).publish(eq("kbad"), eq("bad"), anyString());
+        verify(visitorLogs, times(1)).persistBatch(anyList());
+        verify(rollup,      times(1)).upsertBatch(anyList());  // good record still processed
+        verify(ack,         times(1)).acknowledge();
     }
 
     @Test
     void batchDbFailureLeavesUnacked() {
         EnrichedEvent enriched = sampleEnriched();
+        RawEvent raw = sampleRaw(enriched.eventId());
         doAnswer(inv -> {
             EnrichmentPipeline.ParseResult pr = inv.getArgument(1);
             pr.eventId = enriched.eventId();
+            pr.rawEvent = raw;
             return enriched;
         }).when(pipeline).parseAndEnrich(anyString(), any(EnrichmentPipeline.ParseResult.class));
+        doNothing().when(visitorLogs).persistBatch(anyList());
         doThrow(new RuntimeException("db gone")).when(rollup).upsertBatch(anyList());
 
         Acknowledgment ack = mock(Acknowledgment.class);
