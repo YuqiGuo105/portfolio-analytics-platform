@@ -108,6 +108,11 @@ analytics:
     enabled: ${ANALYTICS_BACKFILL_ENABLED:false}
     site-id: ${ANALYTICS_SITE_ID:yuqi.site}
     batch-size: ${ANALYTICS_BACKFILL_BATCH:500}
+  retention:
+    enabled: ${ANALYTICS_RETENTION_ENABLED:true}
+    five-min-retain-days: ${ANALYTICS_RETENTION_5M_DAYS:3}
+    batch-size: ${ANALYTICS_RETENTION_BATCH:2000}
+    max-per-run: ${ANALYTICS_RETENTION_MAX:50000}
 
 ---
 # Prod profile: hide the OpenAPI surface. Anyone who happens to hit the
