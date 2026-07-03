@@ -61,20 +61,13 @@ public class SessionAggregatorService {
     public void processBatch(List<EnrichedEvent> events) {
         if (events == null || events.isEmpty()) return;
 
-        log.info("{\"event\":\"session_batch_start\",\"size\":{}}", events.size());
-
         // Group events by session
         Map<String, List<EnrichedEvent>> bySession = new HashMap<>();
         for (EnrichedEvent e : events) {
             String key = resolveSessionKey(e);
-            if (key == null) {
-                log.warn("{\"event\":\"session_key_null\",\"eventId\":\"{}\"}", e.eventId());
-                continue;
-            }
+            if (key == null) continue;
             bySession.computeIfAbsent(key, k -> new java.util.ArrayList<>()).add(e);
         }
-
-        log.info("{\"event\":\"session_batch_grouped\",\"sessions\":{}}", bySession.size());
 
         // Upsert each session and insert funnel steps
         for (var entry : bySession.entrySet()) {
@@ -115,8 +108,6 @@ public class SessionAggregatorService {
                     entryPage, exitPage,
                     first.deviceType(), first.browser(), first.os(),
                     country, geoAreaId);
-            log.info("{\"event\":\"session_upserted\",\"sessionId\":\"{}\",\"siteId\":\"{}\"}",
-                    sessionKey, siteId);
         } catch (RuntimeException e) {
             log.warn("{\"event\":\"session_upsert_error\",\"sessionId\":\"{}\",\"err\":\"{}\"}",
                     sessionKey, e.getMessage());

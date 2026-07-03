@@ -55,7 +55,7 @@ public class VisitorLogPersistService {
                 (event_id, ip, local_time, event, ua, country, region, city,
                  latitude, longitude, created_at)
             values (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-            on conflict do nothing
+            on conflict (event_id) do nothing
             """;
 
     private final JdbcTemplate jdbc;

@@ -37,7 +37,7 @@ import java.util.Map;
  */
 @RestController
 @RequestMapping("/api/public")
-@CrossOrigin(origins = "*", allowedHeaders = "*", exposedHeaders = {"ETag"}, methods = {
+@CrossOrigin(origins = "*", allowedHeaders = "*", methods = {
         org.springframework.web.bind.annotation.RequestMethod.GET,
         org.springframework.web.bind.annotation.RequestMethod.HEAD,
         org.springframework.web.bind.annotation.RequestMethod.OPTIONS
@@ -126,17 +126,15 @@ public class PublicVisitsController {
         ResponseCache.CacheEntry hit = cache.get(cacheKey);
         if (hit != null) {
             if (hit.etag().equals(ifNoneMatch)) {
-                return ResponseEntity.status(HttpStatus.NOT_MODIFIED)
-                        .header("ETag", hit.etag()).build();
+                return ResponseEntity.status(HttpStatus.NOT_MODIFIED).eTag(hit.etag()).build();
             }
-            return ResponseEntity.ok()
-                    .header("ETag", hit.etag())
+            return ResponseEntity.ok().eTag(hit.etag())
                     .header("Content-Type", "application/json").body(hit.json());
         }
 
         List<Map<String, Object>> result = runMarkersQuery(ws, geoLevel, bbox, boundedLimit);
         String etag = cache.put(cacheKey, result);
-        return ResponseEntity.ok().header("ETag", etag).body(result);
+        return ResponseEntity.ok().eTag(etag).body(result);
     }
 
     /**
@@ -180,11 +178,9 @@ public class PublicVisitsController {
         ResponseCache.CacheEntry hit = cache.get(cacheKey);
         if (hit != null) {
             if (hit.etag().equals(ifNoneMatch)) {
-                return ResponseEntity.status(HttpStatus.NOT_MODIFIED)
-                        .header("ETag", hit.etag()).build();
+                return ResponseEntity.status(HttpStatus.NOT_MODIFIED).eTag(hit.etag()).build();
             }
-            return ResponseEntity.ok()
-                    .header("ETag", hit.etag())
+            return ResponseEntity.ok().eTag(hit.etag())
                     .header("Content-Type", "application/json").body(hit.json());
         }
 
@@ -230,7 +226,7 @@ public class PublicVisitsController {
                 "timeSeries", timeSeries);
 
         String etag = cache.put(cacheKey, result);
-        return ResponseEntity.ok().header("ETag", etag).body(result);
+        return ResponseEntity.ok().eTag(etag).body(result);
     }
 
     // ────────────────────────────────────────────────────────────────────
@@ -252,11 +248,9 @@ public class PublicVisitsController {
         ResponseCache.CacheEntry hit = cache.get(cacheKey);
         if (hit != null) {
             if (hit.etag().equals(ifNoneMatch)) {
-                return ResponseEntity.status(HttpStatus.NOT_MODIFIED)
-                        .header("ETag", hit.etag()).build();
+                return ResponseEntity.status(HttpStatus.NOT_MODIFIED).eTag(hit.etag()).build();
             }
-            return ResponseEntity.ok()
-                    .header("ETag", hit.etag())
+            return ResponseEntity.ok().eTag(hit.etag())
                     .header("Content-Type", "application/json").body(hit.json());
         }
 
@@ -282,7 +276,7 @@ public class PublicVisitsController {
                 "window", ws.label);
 
         String etag = cache.put(cacheKey, result);
-        return ResponseEntity.ok().header("ETag", etag).body(result);
+        return ResponseEntity.ok().eTag(etag).body(result);
     }
 
     /**
@@ -300,11 +294,9 @@ public class PublicVisitsController {
         ResponseCache.CacheEntry hit = cache.get(cacheKey);
         if (hit != null) {
             if (hit.etag().equals(ifNoneMatch)) {
-                return ResponseEntity.status(HttpStatus.NOT_MODIFIED)
-                        .header("ETag", hit.etag()).build();
+                return ResponseEntity.status(HttpStatus.NOT_MODIFIED).eTag(hit.etag()).build();
             }
-            return ResponseEntity.ok()
-                    .header("ETag", hit.etag())
+            return ResponseEntity.ok().eTag(hit.etag())
                     .header("Content-Type", "application/json").body(hit.json());
         }
 
@@ -319,7 +311,7 @@ public class PublicVisitsController {
         Map<String, Object> result = Map.of("steps", steps, "window", ws.label);
 
         String etag = cache.put(cacheKey, result);
-        return ResponseEntity.ok().header("ETag", etag).body(result);
+        return ResponseEntity.ok().eTag(etag).body(result);
     }
 
     // ────────────────────────────────────────────────────────────────────

@@ -1,6 +1,5 @@
 package site.yuqi.analytics.common.event;
 
-import com.fasterxml.jackson.annotation.JsonIgnoreProperties;
 import com.fasterxml.jackson.annotation.JsonInclude;
 
 import java.time.Instant;
@@ -29,7 +28,6 @@ import java.time.Instant;
  * @param geoHint    Edge-header-derived hint, advisory only.
  */
 @JsonInclude(JsonInclude.Include.NON_NULL)
-@JsonIgnoreProperties(ignoreUnknown = true)
 public record RawEvent(
         String eventId,
         String siteId,
