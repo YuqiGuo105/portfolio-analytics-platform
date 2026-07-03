@@ -13,13 +13,14 @@ import java.time.Duration;
  * {@link RollupUpsertService}.
  *
  * <p>One HLL key per (siteId, granularity, bucketEpoch, geoLevel, geoAreaId,
- * eventType). Device/browser/os are intentionally excluded from the key to
- * keep the total key count within Valkey free-tier memory (~12 KB per HLL,
- * and most keys stay well below that at low cardinality). The trade-off:
- * unique_sessions is counted across devices within the same geo/event
- * bucket. If a visitor uses Chrome AND Firefox in the same 5-min window,
- * that registers as 1 unique session (desirable since session identity is
- * more important than device identity for this metric).
+ * eventType). Device/browser/os are intentionally excluded from the HLL
+ * <b>key</b> to keep the total key count within Valkey free-tier memory
+ * (~12 KB per HLL). However, device type IS reflected in the
+ * <b>session key value</b> that is PFADD'd into the HLL: when the caller
+ * (RollupUpsertService) falls back to ipHash, it appends the device type
+ * (desktop/mobile/tablet), so the same IP on different device types
+ * counts as distinct unique sessions. Same device type with different
+ * browsers still counts as one session (e.g. phone Chrome + phone Safari = 1).
  *
  * <p>TTL policy: 5m-granularity keys expire after 2 hours; 1d keys after
  * 48 hours. The HLL only needs to survive the bucket's active-write window.

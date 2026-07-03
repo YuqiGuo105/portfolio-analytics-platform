@@ -162,11 +162,28 @@ public class RollupUpsertService {
                 key.geoLevel, key.geoAreaId, key.eventType, sessionKey);
     }
 
-    /** Resolve the best session identity: sessionId > anonId > ipHash. */
+    /**
+     * 解析最佳会话身份标识：sessionId > anonId > ipHash + 设备类型。
+     *
+     * <p>当前前端尚未落地稳定的 anonId/sessionId cookie，所有请求的
+     * sessionId 和 anonId 字段均为空，永远 fallback 到 ipHash。
+     * 为使同一 IP 下不同设备被计为不同 unique visitor，在 fallback
+     * 到 ipHash 时追加设备类型 (desktop/mobile/tablet)。
+     *
+     * <p>粒度选择：按 deviceType 区分，不按 browser/os 区分。
+     * 即：电脑访问 + 手机访问 = 2 个 unique session；
+     * 手机上换浏览器仍算 1 个 unique session（同一设备）。
+     *
+     * <p><b>注意</b>：这是 anonId/sessionId cookie 落地前的 best-effort
+     * 近似方案。真正的长期修复是前端设置稳定的 anonId（设备级）+
+     * sessionId（会话级），使身份不再依赖 IP。
+     */
     private static String resolveSessionKey(EnrichedEvent e) {
         if (e.sessionId() != null && !e.sessionId().isBlank()) return e.sessionId();
         if (e.anonId() != null && !e.anonId().isBlank()) return e.anonId();
-        return e.ipHash();
+        // fallback: ipHash + 设备类型，让同 IP 不同设备（电脑/手机/平板）算作不同 unique visitor
+        // 同一设备换浏览器不额外计数
+        return e.ipHash() + ":" + nz(e.deviceType());
     }
 
     private static String nz(String s) {

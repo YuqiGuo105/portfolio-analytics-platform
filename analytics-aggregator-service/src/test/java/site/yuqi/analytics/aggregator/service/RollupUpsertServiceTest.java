@@ -259,4 +259,123 @@ class RollupUpsertServiceTest {
         assertThat(fiveMinRow[fiveMinRow.length - 2]).isEqualTo(1L); // event_count=1
         assertThat(fiveMinRow[fiveMinRow.length - 1]).isEqualTo(0L); // unique_sessions=0 (fail-open)
     }
+
+    // ----------------------------------------------------------- IP+device 去重测试
+
+    @Test
+    void sameIpDifferentDeviceTypeCountsAsDifferentSessions() {
+        // 同一 ipHash，desktop vs mobile → 不同设备类型 → 计为 2 个 unique sessions
+        Instant ts = Instant.parse("2026-06-23T12:03:00Z");
+
+        // sessionId/anonId 为空 → fallback 到 ipHash+deviceType
+        EnrichedEvent desktop = new EnrichedEvent(
+                "e1", "yuqi.site", "page_view",
+                ts, ts.plusMillis(50),
+                null, null, "/", null, null,
+                "desktop", "Chrome", "macOS", false, 0.0,
+                "same-ip-hash",
+                new EnrichedGeo(GeoLevel.METRO, "METRO:US:CA:Stockton", "US", "CA", "Stockton"));
+
+        EnrichedEvent mobile = new EnrichedEvent(
+                "e2", "yuqi.site", "page_view",
+                ts.plusSeconds(10), ts.plusSeconds(10),
+                null, null, "/", null, null,
+                "mobile", "Safari", "iOS", false, 0.0,
+                "same-ip-hash",
+                new EnrichedGeo(GeoLevel.METRO, "METRO:US:CA:Stockton", "US", "CA", "Stockton"));
+
+        when(sessionCounter.addAndDelta(anyString(), anyString(), anyLong(),
+                anyString(), anyString(), anyString(), anyString())).thenReturn(1L);
+
+        svc.upsertBatch(List.of(desktop, mobile));
+
+        // 验证 sessionCounter 收到不同的 session key（ipHash:deviceType）
+        ArgumentCaptor<String> sessionKeyCaptor = ArgumentCaptor.forClass(String.class);
+        verify(sessionCounter, times(4)).addAndDelta(
+                anyString(), anyString(), anyLong(),
+                anyString(), anyString(), anyString(), sessionKeyCaptor.capture());
+
+        List<String> keys = sessionKeyCaptor.getAllValues();
+        assertThat(keys).contains("same-ip-hash:desktop", "same-ip-hash:mobile");
+    }
+
+    @Test
+    void sameIpSameDeviceDifferentBrowserCountsAsOne() {
+        // 同一 ipHash + 同一 deviceType（mobile），但不同浏览器 → 仍算 1 个 unique session
+        Instant ts = Instant.parse("2026-06-23T12:03:00Z");
+
+        EnrichedEvent chrome = new EnrichedEvent(
+                "e1", "yuqi.site", "page_view",
+                ts, ts.plusMillis(50),
+                null, null, "/", null, null,
+                "mobile", "Chrome", "iOS", false, 0.0,
+                "same-ip-hash",
+                new EnrichedGeo(GeoLevel.METRO, "METRO:US:CA:Stockton", "US", "CA", "Stockton"));
+
+        EnrichedEvent safari = new EnrichedEvent(
+                "e2", "yuqi.site", "page_view",
+                ts.plusSeconds(30), ts.plusSeconds(30),
+                null, null, "/", null, null,
+                "mobile", "Safari", "iOS", false, 0.0,
+                "same-ip-hash",
+                new EnrichedGeo(GeoLevel.METRO, "METRO:US:CA:Stockton", "US", "CA", "Stockton"));
+
+        // 两者 session key 相同: "same-ip-hash:mobile"
+        String expectedKey = "same-ip-hash:mobile";
+        java.util.concurrent.atomic.AtomicInteger calls = new java.util.concurrent.atomic.AtomicInteger(0);
+        when(sessionCounter.addAndDelta(anyString(), anyString(), anyLong(),
+                anyString(), anyString(), anyString(), eq(expectedKey)))
+                .thenAnswer(inv -> calls.incrementAndGet() == 1 ? 1L : 0L);
+
+        svc.upsertBatch(List.of(chrome, safari));
+
+        ArgumentCaptor<List<Object[]>> rowsCaptor = ArgumentCaptor.forClass(List.class);
+        verify(jdbc, times(2)).batchUpdate(anyString(), rowsCaptor.capture());
+
+        // 验证 session key 都是相同的（不区分浏览器）
+        ArgumentCaptor<String> keyCaptor = ArgumentCaptor.forClass(String.class);
+        verify(sessionCounter, times(4)).addAndDelta(
+                anyString(), anyString(), anyLong(),
+                anyString(), anyString(), anyString(), keyCaptor.capture());
+        // 所有 session key 都应该是 "same-ip-hash:mobile"
+        assertThat(keyCaptor.getAllValues()).containsOnly(expectedKey);
+    }
+
+    @Test
+    void sameIpSameDeviceRefreshCountsEventButNotSession() {
+        // 同一 IP + 同一设备类型 + 同一浏览器刷新多次 → event_count 累加，unique_sessions 只计 1
+        Instant ts = Instant.parse("2026-06-23T12:03:00Z");
+
+        EnrichedEvent e1 = new EnrichedEvent(
+                "e1", "yuqi.site", "page_view",
+                ts, ts.plusMillis(50),
+                null, null, "/", null, null,
+                "desktop", "Chrome", "macOS", false, 0.0,
+                "same-ip-hash",
+                new EnrichedGeo(GeoLevel.METRO, "METRO:US:CA:Stockton", "US", "CA", "Stockton"));
+
+        EnrichedEvent e2 = new EnrichedEvent(
+                "e2", "yuqi.site", "page_view",
+                ts.plusSeconds(30), ts.plusSeconds(30),
+                null, null, "/", null, null,
+                "desktop", "Chrome", "macOS", false, 0.0,
+                "same-ip-hash",
+                new EnrichedGeo(GeoLevel.METRO, "METRO:US:CA:Stockton", "US", "CA", "Stockton"));
+
+        // 相同 session key "same-ip-hash:desktop"，第一次 1，第二次 0
+        String expectedKey = "same-ip-hash:desktop";
+        java.util.concurrent.atomic.AtomicInteger callCount = new java.util.concurrent.atomic.AtomicInteger(0);
+        when(sessionCounter.addAndDelta(anyString(), anyString(), anyLong(),
+                anyString(), anyString(), anyString(), eq(expectedKey)))
+                .thenAnswer(inv -> callCount.incrementAndGet() == 1 ? 1L : 0L);
+
+        svc.upsertBatch(List.of(e1, e2));
+
+        ArgumentCaptor<List<Object[]>> rowsCaptor = ArgumentCaptor.forClass(List.class);
+        verify(jdbc, times(2)).batchUpdate(anyString(), rowsCaptor.capture());
+
+        Object[] fiveMinRow = rowsCaptor.getAllValues().get(0).get(0);
+        assertThat(fiveMinRow[fiveMinRow.length - 2]).isEqualTo(2L); // event_count=2（刷新两次）
+        assertThat(fiveMinRow[fiveMinRow.length - 1]).isEqualTo(1L); // unique_sessions=1（同设备）
+    }
 }

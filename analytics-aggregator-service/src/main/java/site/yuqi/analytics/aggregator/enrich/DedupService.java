@@ -34,7 +34,16 @@ public class DedupService {
         try {
             Boolean ok = redis.opsForValue().setIfAbsent(
                     KEY_PREFIX + eventId, "1", Duration.ofSeconds(ttlSeconds));
-            return Boolean.TRUE.equals(ok);
+            if (ok == null) {
+                // Lettuce can return null when connection pool is in a degraded
+                // state (pipeline/transaction context). Treat as fail-open.
+                log.warn("{\"event\":\"dedup_setnx_null\",\"eventId\":\"{}\"}", eventId);
+                return true;
+            }
+            if (!ok) {
+                log.debug("{\"event\":\"dedup_hit\",\"eventId\":\"{}\"}", eventId);
+            }
+            return ok;
         } catch (RuntimeException e) {
             log.warn("{\"event\":\"dedup_redis_error\",\"err\":\"{}\"}", e.getMessage());
             return true; // fail-open
