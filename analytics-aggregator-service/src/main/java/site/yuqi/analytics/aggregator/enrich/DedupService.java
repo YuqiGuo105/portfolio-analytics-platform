@@ -28,6 +28,9 @@ public class DedupService {
     @Value("${analytics.dedup.ttl-seconds:86400}")
     private long ttlSeconds;
 
+    @Value("${analytics.dedup.throttle-seconds:300}")
+    private long throttleSeconds;
+
     /** @return {@code true} when this is the first time we've seen {@code eventId}. */
     public boolean acquire(String eventId) {
         if (eventId == null || eventId.isBlank()) return true;
@@ -46,6 +49,34 @@ public class DedupService {
             return ok;
         } catch (RuntimeException e) {
             log.warn("{\"event\":\"dedup_redis_error\",\"err\":\"{}\"}", e.getMessage());
+            return true; // fail-open
+        }
+    }
+
+    /**
+     * Visit throttle: same session + same page within {@code throttleSeconds}
+     * (default 5 min) is suppressed from rollup counting.
+     *
+     * @return {@code true} if this is a <b>new</b> visit (count it);
+     *         {@code false} if it is a refresh within the throttle window (skip it).
+     */
+    public boolean throttleVisit(String sessionKey, String pageUrl) {
+        if (sessionKey == null || sessionKey.isBlank()) return true;
+        if (pageUrl == null || pageUrl.isBlank()) return true;
+        String key = "analytics:throttle:" + sessionKey + ":" + pageUrl;
+        try {
+            Boolean ok = redis.opsForValue().setIfAbsent(
+                    key, "1", Duration.ofSeconds(throttleSeconds));
+            if (ok == null) {
+                log.warn("{\"event\":\"throttle_setnx_null\",\"sessionKey\":\"{}\",\"page\":\"{}\"}", sessionKey, pageUrl);
+                return true; // fail-open
+            }
+            if (!ok) {
+                log.debug("{\"event\":\"throttle_hit\",\"sessionKey\":\"{}\",\"page\":\"{}\"}", sessionKey, pageUrl);
+            }
+            return ok;
+        } catch (RuntimeException e) {
+            log.warn("{\"event\":\"throttle_redis_error\",\"err\":\"{}\"}", e.getMessage());
             return true; // fail-open
         }
     }

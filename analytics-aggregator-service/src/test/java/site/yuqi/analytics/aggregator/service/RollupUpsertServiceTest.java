@@ -4,6 +4,7 @@ import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.mockito.ArgumentCaptor;
 import org.springframework.jdbc.core.JdbcTemplate;
+import site.yuqi.analytics.aggregator.enrich.DedupService;
 import site.yuqi.analytics.common.event.EnrichedEvent;
 import site.yuqi.analytics.common.event.EnrichedGeo;
 import site.yuqi.analytics.common.event.GeoLevel;
@@ -32,17 +33,21 @@ class RollupUpsertServiceTest {
 
     private JdbcTemplate jdbc;
     private UniqueSessionCounter sessionCounter;
+    private DedupService dedupService;
     private RollupUpsertService svc;
 
     @BeforeEach
     void setUp() {
         jdbc = mock(JdbcTemplate.class);
         sessionCounter = mock(UniqueSessionCounter.class);
+        dedupService = mock(DedupService.class);
         when(jdbc.update(anyString(), (Object[]) any())).thenReturn(1);
         // Default: every session is unique (delta=1), matching old behaviour.
         when(sessionCounter.addAndDelta(anyString(), anyString(), anyLong(),
                 anyString(), anyString(), anyString(), anyString())).thenReturn(1L);
-        svc = new RollupUpsertService(jdbc, sessionCounter);
+        // Default: throttle allows all visits through.
+        when(dedupService.throttleVisit(anyString(), anyString())).thenReturn(true);
+        svc = new RollupUpsertService(jdbc, sessionCounter, dedupService);
     }
 
     @Test
@@ -377,5 +382,80 @@ class RollupUpsertServiceTest {
         Object[] fiveMinRow = rowsCaptor.getAllValues().get(0).get(0);
         assertThat(fiveMinRow[fiveMinRow.length - 2]).isEqualTo(2L); // event_count=2（刷新两次）
         assertThat(fiveMinRow[fiveMinRow.length - 1]).isEqualTo(1L); // unique_sessions=1（同设备）
+    }
+
+    // ----------------------------------------------------------- visit throttle tests
+
+    @Test
+    void throttledRefreshWithin5MinSkipsRollupCounting() {
+        // 同一 session+page 5 分钟内刷新 → throttle 返回 false → 不计入 rollup
+        Instant ts = Instant.parse("2026-06-23T12:03:00Z");
+
+        EnrichedEvent e1 = new EnrichedEvent(
+                "e1", "yuqi.site", "page_view",
+                ts, ts.plusMillis(50),
+                null, null, "/about", null, null,
+                "desktop", "Chrome", "macOS", false, 0.0,
+                "ip-hash-1",
+                new EnrichedGeo(GeoLevel.METRO, "METRO:US:CA:Stockton", "US", "CA", "Stockton"));
+
+        EnrichedEvent e2 = new EnrichedEvent(
+                "e2", "yuqi.site", "page_view",
+                ts.plusSeconds(60), ts.plusSeconds(60),
+                null, null, "/about", null, null,
+                "desktop", "Chrome", "macOS", false, 0.0,
+                "ip-hash-1",
+                new EnrichedGeo(GeoLevel.METRO, "METRO:US:CA:Stockton", "US", "CA", "Stockton"));
+
+        // First call: allow (new visit). Second call onwards: throttled (refresh).
+        java.util.concurrent.atomic.AtomicInteger throttleCalls = new java.util.concurrent.atomic.AtomicInteger(0);
+        when(dedupService.throttleVisit(eq("ip-hash-1:desktop"), eq("/about")))
+                .thenAnswer(inv -> throttleCalls.incrementAndGet() == 1);
+
+        svc.upsertBatch(List.of(e1, e2));
+
+        // Only 1 event should be counted (the second was throttled)
+        ArgumentCaptor<List<Object[]>> rowsCaptor = ArgumentCaptor.forClass(List.class);
+        verify(jdbc, times(2)).batchUpdate(anyString(), rowsCaptor.capture());
+
+        Object[] fiveMinRow = rowsCaptor.getAllValues().get(0).get(0);
+        assertThat(fiveMinRow[fiveMinRow.length - 2]).isEqualTo(1L); // event_count=1 (throttled refresh skipped)
+    }
+
+    @Test
+    void differentPagesNotThrottled() {
+        // 同一 session 访问不同页面 → 都通过 throttle → 都计数
+        Instant ts = Instant.parse("2026-06-23T12:03:00Z");
+
+        EnrichedEvent e1 = new EnrichedEvent(
+                "e1", "yuqi.site", "page_view",
+                ts, ts.plusMillis(50),
+                null, null, "/about", null, null,
+                "desktop", "Chrome", "macOS", false, 0.0,
+                "ip-hash-1",
+                new EnrichedGeo(GeoLevel.METRO, "METRO:US:CA:Stockton", "US", "CA", "Stockton"));
+
+        EnrichedEvent e2 = new EnrichedEvent(
+                "e2", "yuqi.site", "page_view",
+                ts.plusSeconds(10), ts.plusSeconds(10),
+                null, null, "/works", null, null,
+                "desktop", "Chrome", "macOS", false, 0.0,
+                "ip-hash-1",
+                new EnrichedGeo(GeoLevel.METRO, "METRO:US:CA:Stockton", "US", "CA", "Stockton"));
+
+        // Different pages → both pass throttle
+        when(dedupService.throttleVisit(eq("ip-hash-1:desktop"), eq("/about"))).thenReturn(true);
+        when(dedupService.throttleVisit(eq("ip-hash-1:desktop"), eq("/works"))).thenReturn(true);
+
+        svc.upsertBatch(List.of(e1, e2));
+
+        // Both events counted — same rollup key (same geo/device/bucket) → collapsed to 1 row with count=2
+        ArgumentCaptor<List<Object[]>> rowsCaptor = ArgumentCaptor.forClass(List.class);
+        verify(jdbc, times(2)).batchUpdate(anyString(), rowsCaptor.capture());
+
+        // event_count should be 2 (both visits counted)
+        long totalEvents = rowsCaptor.getAllValues().get(0).stream()
+                .mapToLong(row -> (Long) row[row.length - 2]).sum();
+        assertThat(totalEvents).isEqualTo(2L);
     }
 }
