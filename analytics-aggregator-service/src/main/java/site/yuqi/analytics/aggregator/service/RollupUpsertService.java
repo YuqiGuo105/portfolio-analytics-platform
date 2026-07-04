@@ -4,7 +4,6 @@ import lombok.RequiredArgsConstructor;
 import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
-import site.yuqi.analytics.aggregator.enrich.DedupService;
 import site.yuqi.analytics.common.event.EnrichedEvent;
 import site.yuqi.analytics.common.event.Granularity;
 
@@ -55,7 +54,6 @@ public class RollupUpsertService {
 
     private final JdbcTemplate jdbc;
     private final UniqueSessionCounter sessionCounter;
-    private final DedupService dedupService;
 
     // ------------------------------------------------------------------ single
 
@@ -65,7 +63,6 @@ public class RollupUpsertService {
         Objects.requireNonNull(e, "enriched event must not be null");
         Instant ts = e.eventTime() == null ? Instant.now() : e.eventTime();
         String sessionKey = resolveSessionKey(e);
-        if (!dedupService.throttleVisit(sessionKey, e.pageUrl())) return;
         long sess5m = hllDelta(e, Granularity.FIVE_MIN, ts, sessionKey);
         long sess1d = hllDelta(e, Granularity.ONE_DAY,  ts, sessionKey);
         upsertAtGranularity(e, ts, Granularity.FIVE_MIN, 1L, sess5m);
@@ -93,8 +90,6 @@ public class RollupUpsertService {
             if (e == null) continue;
             Instant ts = e.eventTime() == null ? Instant.now() : e.eventTime();
             String sessionKey = resolveSessionKey(e);
-            // Visit throttle: same session + same page within 5 min → skip
-            if (!dedupService.throttleVisit(sessionKey, e.pageUrl())) continue;
             accumulate(fiveMin, e, Granularity.FIVE_MIN, ts, sessionKey);
             accumulate(oneDay,  e, Granularity.ONE_DAY,  ts, sessionKey);
         }

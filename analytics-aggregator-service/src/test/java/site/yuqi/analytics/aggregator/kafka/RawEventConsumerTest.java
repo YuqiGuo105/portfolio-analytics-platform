@@ -4,6 +4,7 @@ import org.apache.kafka.clients.consumer.ConsumerRecord;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.springframework.kafka.support.Acknowledgment;
+import site.yuqi.analytics.aggregator.enrich.DedupService;
 import site.yuqi.analytics.aggregator.enrich.EnrichmentPipeline;
 import site.yuqi.analytics.aggregator.service.RollupUpsertService;
 import site.yuqi.analytics.aggregator.service.SessionAggregatorService;
@@ -28,6 +29,7 @@ import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.doAnswer;
 import static org.mockito.Mockito.doNothing;
+import static org.mockito.Mockito.doReturn;
 import static org.mockito.Mockito.doThrow;
 import static org.mockito.Mockito.inOrder;
 import static org.mockito.Mockito.mock;
@@ -48,6 +50,7 @@ class RawEventConsumerTest {
     private SessionAggregatorService sessions;
     private VisitorLogPersistService visitorLogs;
     private DlqProducer dlq;
+    private DedupService dedupService;
     private RawEventConsumer consumer;
 
     @BeforeEach
@@ -57,7 +60,10 @@ class RawEventConsumerTest {
         sessions = mock(SessionAggregatorService.class);
         visitorLogs = mock(VisitorLogPersistService.class);
         dlq = mock(DlqProducer.class);
-        consumer = new RawEventConsumer(pipeline, rollup, sessions, visitorLogs, dlq);
+        dedupService = mock(DedupService.class);
+        // Default: all visits are new (throttle passes through)
+        doReturn(true).when(dedupService).throttleVisit(any(EnrichedEvent.class));
+        consumer = new RawEventConsumer(pipeline, rollup, sessions, visitorLogs, dlq, dedupService);
     }
 
     @Test
@@ -268,6 +274,31 @@ class RawEventConsumerTest {
         verify(rollup, never()).upsertBatch(anyList());
         verify(ack,    times(1)).acknowledge();
         verify(dlq,    never()).publish(any(), any(), any());
+    }
+
+    @Test
+    void throttledRefreshSkipsVisitorLogsAndRollup() {
+        // 5分钟内刷新同一页面 → throttle 返回 false → visitor_logs 和 rollup 都不写入
+        EnrichedEvent enriched = sampleEnriched();
+        RawEvent raw = sampleRaw(enriched.eventId());
+        doAnswer(inv -> {
+            EnrichmentPipeline.ParseResult pr = inv.getArgument(1);
+            pr.eventId = enriched.eventId();
+            pr.rawEvent = raw;
+            return enriched;
+        }).when(pipeline).parseAndEnrich(anyString(), any(EnrichmentPipeline.ParseResult.class));
+
+        // Simulate throttled refresh
+        doReturn(false).when(dedupService).throttleVisit(any(EnrichedEvent.class));
+
+        Acknowledgment ack = mock(Acknowledgment.class);
+        consumer.onMessage(List.of(record("k", "{}", 5L)), ack);
+
+        // Neither visitor_logs NOR rollup should be written
+        verify(visitorLogs, never()).persistBatch(anyList());
+        verify(rollup,      never()).upsertBatch(anyList());
+        // But the batch is still acked (throttled events are intentionally dropped)
+        verify(ack, times(1)).acknowledge();
     }
 
     private static ConsumerRecord<String, String> record(String key, String value, long offset) {

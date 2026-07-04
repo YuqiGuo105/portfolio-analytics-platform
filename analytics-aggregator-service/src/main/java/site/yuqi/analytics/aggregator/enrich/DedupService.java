@@ -55,7 +55,10 @@ public class DedupService {
 
     /**
      * Visit throttle: same session + same page within {@code throttleSeconds}
-     * (default 5 min) is suppressed from rollup counting.
+     * (default 5 min). Called once per event in {@code RawEventConsumer} so
+     * throttled refreshes are dropped before reaching both {@code visitor_logs}
+     * AND {@code geo_time_rollups} — ensuring the dashboard TODAY count does
+     * not increment on rapid page refreshes.
      *
      * @return {@code true} if this is a <b>new</b> visit (count it);
      *         {@code false} if it is a refresh within the throttle window (skip it).
@@ -79,5 +82,23 @@ public class DedupService {
             log.warn("{\"event\":\"throttle_redis_error\",\"err\":\"{}\"}", e.getMessage());
             return true; // fail-open
         }
+    }
+
+    /**
+     * Convenience overload: resolves the session key from an {@link site.yuqi.analytics.common.event.EnrichedEvent}
+     * and delegates to {@link #throttleVisit(String, String)}.
+     * Priority: sessionId > anonId > ipHash:deviceType.
+     */
+    public boolean throttleVisit(site.yuqi.analytics.common.event.EnrichedEvent e) {
+        String sessionKey;
+        if (e.sessionId() != null && !e.sessionId().isBlank()) {
+            sessionKey = e.sessionId();
+        } else if (e.anonId() != null && !e.anonId().isBlank()) {
+            sessionKey = e.anonId();
+        } else {
+            String dt = (e.deviceType() == null || e.deviceType().isBlank()) ? "unknown" : e.deviceType();
+            sessionKey = e.ipHash() + ":" + dt;
+        }
+        return throttleVisit(sessionKey, e.pageUrl());
     }
 }

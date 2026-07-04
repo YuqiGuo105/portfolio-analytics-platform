@@ -6,6 +6,7 @@ import org.apache.kafka.clients.consumer.ConsumerRecord;
 import org.springframework.kafka.annotation.KafkaListener;
 import org.springframework.kafka.support.Acknowledgment;
 import org.springframework.stereotype.Component;
+import site.yuqi.analytics.aggregator.enrich.DedupService;
 import site.yuqi.analytics.aggregator.enrich.EnrichmentPipeline;
 import site.yuqi.analytics.aggregator.service.RollupUpsertService;
 import site.yuqi.analytics.aggregator.service.SessionAggregatorService;
@@ -62,6 +63,7 @@ public class RawEventConsumer {
     private final SessionAggregatorService sessions;
     private final VisitorLogPersistService visitorLogs;
     private final DlqProducer dlq;
+    private final DedupService dedupService;
 
     @KafkaListener(
             topics = "${analytics.topics.raw}",
@@ -102,6 +104,13 @@ public class RawEventConsumer {
                                     pr.parseError, rec.topic(), rec.partition(), rec.offset()));
                 }
                 // Dedup hit or empty payload — just skip, already handled.
+                continue;
+            }
+            // Visit throttle: same session+page within 5 min counts as 1.
+            // Checked here (before visitor_logs write) so the dashboard TODAY
+            // count doesn't increment on rapid page refreshes.
+            if (!dedupService.throttleVisit(ev)) {
+                log.debug("{\"event\":\"visit_throttled\",\"page\":\"{}\"}", ev.pageUrl());
                 continue;
             }
             enriched.add(ev);
