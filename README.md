@@ -4,21 +4,6 @@ Visitor analytics, geo aggregation, and alerting for [yuqi.site](https://yuqi.si
 Powers the **rotating globe** on the homepage dashboard and the
 **`/analytics`** drill-down page.
 
-Built to run end-to-end on **free-tier** infrastructure:
-
-| Concern | Provider | Free-tier ceiling |
-|---|---|---|
-| Event bus | Kafka | **2 topics**, 2 partitions each |
-| Dedup cache | Redis | 30 MB, SSL |
-| Source-of-truth + rollups | Supabase Postgres | 500 MB, 60 conns |
-| Service hosting | Render.com | 750 hrs/mo, cold-start after 15 min idle |
-| Notifications fan-out | Existing `portfolio-notification-service` | shared |
-
-> Why "platform" and not just "service": this repo replaces the ad-hoc
-> `visitor_logs` / `visitor_clicks` tracking that lived directly in the
-> Portfolio's Supabase. Those rows are still the source of truth — see
-> [§ Backfill](#5-backfill-historical-data) for how they get replayed
-> through the new pipeline.
 
 ---
 
