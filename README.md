@@ -8,8 +8,8 @@ Built to run end-to-end on **free-tier** infrastructure:
 
 | Concern | Provider | Free-tier ceiling |
 |---|---|---|
-| Event bus | Aiven Kafka | **2 topics**, 2 partitions each |
-| Dedup cache | Aiven Valkey | 30 MB, SSL |
+| Event bus | Kafka | **2 topics**, 2 partitions each |
+| Dedup cache | Redis | 30 MB, SSL |
 | Source-of-truth + rollups | Supabase Postgres | 500 MB, 60 conns |
 | Service hosting | Render.com | 750 hrs/mo, cold-start after 15 min idle |
 | Notifications fan-out | Existing `portfolio-notification-service` | shared |
@@ -41,12 +41,12 @@ flowchart LR
         proxy["/api/analytics/[...path]<br/>same-origin read proxy"]:::api
     end
 
-    %% =================== Aiven managed services ===================
-    subgraph AIVEN["Aiven (free tier)"]
+    %% =================== managed services ===================
+    subgraph MANAGED["Managed services"]
         direction TB
         kraw[("Kafka topic<br/>analytics.raw.events<br/>2 partitions")]:::topic
         kdlq[("Kafka topic<br/>analytics.events.dlq<br/>2 partitions")]:::topic
-        valkey[("Valkey<br/>event_id SETNX dedup")]:::cache
+        redis[("Redis<br/>event_id SETNX dedup")]:::cache
     end
 
     %% =================== this repo (Render) ===================
@@ -90,7 +90,7 @@ flowchart LR
     kraw --> consumer
     consumer -- "parse + enrich" --> pipeline
     pipeline -. "SETNX event_id (fail-open)" .-> dedupSvc
-    dedupSvc <--> valkey
+    dedupSvc <--> redis
     pipeline -- "EnrichedEvent" --> rollup
     rollup -- "INSERT ... ON CONFLICT" --> rollups
     consumer -. "parse/missing field" .-> dlqProd
@@ -127,7 +127,7 @@ flowchart LR
 ```
 
 > **Read this as a UML component diagram:** rounded boxes are actors,
-> stadium / cylinder shapes are external stores (Kafka topics, Valkey,
+> stadium / cylinder shapes are external stores (Kafka topics, Redis,
 > Postgres tables), and rectangles inside the service subgraphs are
 > Spring components. Solid arrows are synchronous calls or Kafka
 > produce/consume; dashed arrows are best-effort side-channels
@@ -136,14 +136,14 @@ flowchart LR
 ### 1.2 ASCII overview
 
 ```
-            Ingestion API                          Aiven Kafka
+            Ingestion API                            Kafka
    (Portfolio Next.js /api/track)   ───→    analytics.raw.events
                                                      │
                                                      ▼
                                        ┌──────────────────────────────┐
                                        │ analytics-aggregator-service │
                                        │  ┌──────────────────────┐    │
-   Aiven Valkey  ◀──────────  SETNX ──│  │  EnrichmentPipeline  │    │
+   Redis  ◀──────────  SETNX ─────────│  │  EnrichmentPipeline  │    │
    (event_id dedup)                    │  │  UA · bot · ip_hash  │    │
                                        │  │  GeoSnap → METRO     │    │
                                        │  └──────────┬───────────┘    │
@@ -179,10 +179,10 @@ flowchart LR
 
 ### Why only 2 topics
 
-Aiven Kafka's free plan caps you at 2 topics. We previously had a
-`raw → enrich service → enriched topic → aggregator` chain, which needed
-3 topics. **The enrichment step now runs in-process inside the aggregator**
-so the wire surface is exactly:
+The free Kafka plan caps at 2 topics. We previously had a
+`raw → enrich service → enriched topic → aggregator` chain requiring 3.
+**Enrichment now runs in-process inside the aggregator**, reducing the
+wire surface to exactly:
 
 - `analytics.raw.events` — every event from the Ingestion API
 - `analytics.events.dlq` — poison-pill records
@@ -206,7 +206,7 @@ so the wire surface is exactly:
 
 - JDK 21 (the Maven wrapper takes care of Maven itself)
 - A reachable Postgres (Supabase URL works fine) + Redis (`brew install redis`)
-- Optional: an Aiven Kafka cluster if you want to exercise the consumer
+- Optional: a Kafka cluster if you want to exercise the consumer
 
 ### Build + test
 
@@ -221,7 +221,7 @@ The `coverage` profile enforces **≥ 60 % line coverage** per module. All
 
 ```bash
 cp .env.example .env
-# Fill in DB credentials at minimum; Kafka/Valkey can be skipped if
+# Fill in DB credentials at minimum; Kafka/Redis can be skipped if
 # you only want the public read endpoints + backfill mode.
 
 # Steady-state consumer mode
@@ -238,8 +238,8 @@ java -jar analytics-aggregator-service/target/analytics-aggregator-service.jar
 docker compose up --build
 ```
 
-Brings up the aggregator (`:8093`) and alerts (`:8094`). Kafka / Valkey /
-Postgres are still external (Aiven + Supabase) — drive via `.env`.
+Brings up the aggregator (`:8093`) and alerts (`:8094`). Kafka / Redis /
+Postgres are still external — drive via `.env`.
 
 ---
 
@@ -330,16 +330,16 @@ first if you need a fresh backfill.**
 
 ---
 
-## 6. Deploying to Render + Aiven + Supabase
+## 6. Deploying to Render + Supabase
 
 ### 6.1 One-time provisioning
 
 | Step | What | Where |
 |---|---|---|
-| 1 | Create a free **Kafka** service | Aiven console → Services |
-| 2 | Create the 2 topics (`analytics.raw.events`, `analytics.events.dlq`) at 2 partitions each | Aiven service → Topics |
-| 3 | Create a SASL user, copy the Project CA | Aiven service → Users / CA |
-| 4 | Create a free **Valkey** service | Aiven console → Services |
+| 1 | Create a **Kafka** service | Cloud console → Services |
+| 2 | Create the 2 topics (`analytics.raw.events`, `analytics.events.dlq`) at 2 partitions each | Kafka service → Topics |
+| 3 | Create a SASL user, copy the Project CA | Kafka service → Users / CA |
+| 4 | Create a **Redis** service | Cloud console → Services |
 | 5 | Apply the Flyway migrations to Supabase (any V1–V3 SQL file) | Supabase SQL editor, or let the service do it on first boot |
 | 6 | Note the JDBC URL + user + password from Supabase | Supabase → Project Settings → Database |
 
@@ -352,7 +352,7 @@ render blueprint launch
 ```
 
 Render will provision two web services from `render.yaml` and prompt for
-every env var marked `sync: false` (Kafka creds, Valkey URL, Supabase
+every env var marked `sync: false` (Kafka creds, Redis URL, Supabase
 JDBC URL/user/password, notification token, etc.). The HMAC salt is
 auto-generated by Render — copy it out into your password manager since
 rotating it invalidates historical `ip_hash` joins.
