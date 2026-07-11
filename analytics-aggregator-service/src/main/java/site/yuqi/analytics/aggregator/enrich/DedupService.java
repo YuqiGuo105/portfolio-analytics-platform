@@ -53,6 +53,16 @@ public class DedupService {
         }
     }
 
+    /** Release a processing claim after a failed database transaction so Kafka replay can retry it. */
+    public void release(String eventId) {
+        if (eventId == null || eventId.isBlank()) return;
+        try {
+            redis.delete(KEY_PREFIX + eventId);
+        } catch (RuntimeException e) {
+            log.warn("{\"event\":\"dedup_release_error\",\"err\":\"{}\"}", e.getMessage());
+        }
+    }
+
     /**
      * Visit throttle: same session + same page within {@code throttleSeconds}
      * (default 5 min). Called once per event in {@code RawEventConsumer} so
@@ -90,15 +100,25 @@ public class DedupService {
      * Priority: sessionId > anonId > ipHash:deviceType.
      */
     public boolean throttleVisit(site.yuqi.analytics.common.event.EnrichedEvent e) {
-        String sessionKey;
-        if (e.sessionId() != null && !e.sessionId().isBlank()) {
-            sessionKey = e.sessionId();
-        } else if (e.anonId() != null && !e.anonId().isBlank()) {
-            sessionKey = e.anonId();
-        } else {
-            String dt = (e.deviceType() == null || e.deviceType().isBlank()) ? "unknown" : e.deviceType();
-            sessionKey = e.ipHash() + ":" + dt;
+        return throttleVisit(sessionKey(e), e.pageUrl());
+    }
+
+    /** Release a pre-commit refresh-throttle claim when persistence fails. */
+    public void releaseThrottle(site.yuqi.analytics.common.event.EnrichedEvent e) {
+        String sessionKey = sessionKey(e);
+        if (sessionKey == null || e.pageUrl() == null || e.pageUrl().isBlank()) return;
+        try {
+            redis.delete("analytics:throttle:" + sessionKey + ":" + e.pageUrl());
+        } catch (RuntimeException ex) {
+            log.warn("{\"event\":\"throttle_release_error\",\"err\":\"{}\"}", ex.getMessage());
         }
-        return throttleVisit(sessionKey, e.pageUrl());
+    }
+
+    private static String sessionKey(site.yuqi.analytics.common.event.EnrichedEvent e) {
+        if (e.sessionId() != null && !e.sessionId().isBlank()) return e.sessionId();
+        if (e.anonId() != null && !e.anonId().isBlank()) return e.anonId();
+        if (e.ipHash() == null || e.ipHash().isBlank()) return null;
+        String dt = (e.deviceType() == null || e.deviceType().isBlank()) ? "unknown" : e.deviceType();
+        return e.ipHash() + ":" + dt;
     }
 }

@@ -3,6 +3,7 @@ package site.yuqi.analytics.common.event;
 import com.fasterxml.jackson.annotation.JsonInclude;
 
 import java.time.Instant;
+import java.util.Map;
 
 /**
  * In-process wire format produced by the aggregator's enrichment pipeline
@@ -41,5 +42,19 @@ public record EnrichedEvent(
         double botScore,
         /** {@code HMAC-SHA256(salt, ipRaw)} hex. Salt rotation is the only way to break linkage. */
         String ipHash,
-        EnrichedGeo geo) {
+        EnrichedGeo geo,
+        int schemaVersion,
+        String consentState,
+        Map<String, Object> properties) {
+
+    /** Backwards-compatible constructor for callers producing schema-v1 events. */
+    public EnrichedEvent(
+            String eventId, String siteId, String eventType, Instant eventTime,
+            Instant serverTime, String sessionId, String anonId, String pageUrl,
+            String targetUrl, String referrer, String deviceType, String browser,
+            String os, boolean bot, double botScore, String ipHash, EnrichedGeo geo) {
+        this(eventId, siteId, eventType, eventTime, serverTime, sessionId, anonId,
+                pageUrl, targetUrl, referrer, deviceType, browser, os, bot, botScore,
+                ipHash, geo, 1, "unknown", Map.of());
+    }
 }

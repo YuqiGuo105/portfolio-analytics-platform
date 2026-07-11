@@ -67,6 +67,9 @@ public class PublicVisitsController {
     @Value("${analytics.backfill.site-id:yuqi.site}")
     private String siteId;
 
+    @Value("${analytics.public.min-bucket-count:5}")
+    private int minBucketCount;
+
     /**
      * Per-area counts joined with {@code geo_areas.center_lat/lng} so the
      * globe can place a marker. METRO buckets win over their COUNTRY
@@ -198,21 +201,22 @@ public class PublicVisitsController {
         List<Map<String, Object>> topCountries = jdbc.queryForList(
                 "select country as \"country\", sum(event_count) as \"count\" " +
                 "from public.geo_time_rollups " +
-                "where site_id = ? and granularity = '1d'" + timeFilter + " and country <> '' " +
+                "where site_id = ? and granularity = '1d' and event_type = 'page_view'" +
+                timeFilter + " and country <> '' " +
                 "group by country order by sum(event_count) desc limit 20",
                 base);
 
         List<Map<String, Object>> topDevices = jdbc.queryForList(
                 "select device_type as \"deviceType\", sum(event_count) as \"count\" " +
                 "from public.geo_time_rollups " +
-                "where site_id = ? and granularity = '1d'" + timeFilter +
+                "where site_id = ? and granularity = '1d' and event_type = 'page_view'" + timeFilter +
                 "group by device_type order by sum(event_count) desc",
                 base);
 
         List<Map<String, Object>> timeSeries = jdbc.queryForList(
                 "select bucket_time as \"bucketTime\", sum(event_count) as \"count\" " +
                 "from public.geo_time_rollups " +
-                "where site_id = ? and granularity = '1d'" + timeFilter +
+                "where site_id = ? and granularity = '1d' and event_type = 'page_view'" + timeFilter +
                 "group by bucket_time order by bucket_time",
                 base);
 
@@ -227,6 +231,136 @@ public class PublicVisitsController {
 
         String etag = cache.put(cacheKey, result);
         return ResponseEntity.ok().eTag(etag).body(result);
+    }
+
+    /** Privacy-filtered content performance backed by canonical behavior facts. */
+    @GetMapping("/visits/top-pages")
+    public ResponseEntity<?> topPages(
+            @RequestParam(value = "window", required = false) String window,
+            @RequestParam(value = "days", required = false) Integer days,
+            @RequestHeader(value = "If-None-Match", required = false) String ifNoneMatch) {
+        WindowSpec ws = resolveWindow(window, days);
+        String cacheKey = "pub:top-pages:" + ws.label;
+        ResponseCache.CacheEntry hit = cache.get(cacheKey);
+        if (hit != null) return cached(hit, ifNoneMatch);
+
+        String timeFilter = ws.allTime ? "" : " AND event_time >= ? ";
+        List<Object> params = new ArrayList<>(List.of(siteId));
+        if (!ws.allTime) params.add(ws.timestampSince());
+        params.add(minBucketCount);
+
+        List<Map<String, Object>> items = jdbc.queryForList(
+                "SELECT page_path as \"page\", count(*) as \"views\", " +
+                "       count(DISTINCT session_id) as \"uniqueSessions\" " +
+                "FROM public.behavior_events " +
+                "WHERE site_id = ? AND event_name IN ('page_view','content_open') " +
+                "  AND is_bot = false AND page_path IS NOT NULL" + timeFilter +
+                "GROUP BY page_path HAVING count(*) >= ? " +
+                "ORDER BY count(*) DESC LIMIT 25", params.toArray());
+
+        Map<String, Object> result = Map.of("items", items, "window", ws.label,
+                "minBucketCount", minBucketCount);
+        String etag = cache.put(cacheKey, result);
+        return ResponseEntity.ok().eTag(etag).body(result);
+    }
+
+    /** Privacy-filtered acquisition summary; only domains, never full referrer URLs. */
+    @GetMapping("/visits/referrers")
+    public ResponseEntity<?> referrers(
+            @RequestParam(value = "window", required = false) String window,
+            @RequestParam(value = "days", required = false) Integer days,
+            @RequestHeader(value = "If-None-Match", required = false) String ifNoneMatch) {
+        WindowSpec ws = resolveWindow(window, days);
+        String cacheKey = "pub:referrers:" + ws.label;
+        ResponseCache.CacheEntry hit = cache.get(cacheKey);
+        if (hit != null) return cached(hit, ifNoneMatch);
+
+        String timeFilter = ws.allTime ? "" : " AND event_time >= ? ";
+        List<Object> params = new ArrayList<>(List.of(siteId));
+        if (!ws.allTime) params.add(ws.timestampSince());
+        params.add(minBucketCount);
+
+        List<Map<String, Object>> items = jdbc.queryForList(
+                "SELECT referrer_domain as \"referrer\", count(*) as \"count\", " +
+                "       count(DISTINCT session_id) as \"uniqueSessions\" " +
+                "FROM public.behavior_events " +
+                "WHERE site_id = ? AND event_name = 'page_view' AND is_bot = false " +
+                "  AND referrer_domain IS NOT NULL AND referrer_domain <> ''" + timeFilter +
+                "GROUP BY referrer_domain HAVING count(*) >= ? " +
+                "ORDER BY count(*) DESC LIMIT 25", params.toArray());
+
+        Map<String, Object> result = Map.of("items", items, "window", ws.label,
+                "minBucketCount", minBucketCount);
+        String etag = cache.put(cacheKey, result);
+        return ResponseEntity.ok().eTag(etag).body(result);
+    }
+
+    /** Reading-depth and active-time metrics for content analysis. */
+    @GetMapping("/visits/engagement")
+    public ResponseEntity<?> engagement(
+            @RequestParam(value = "window", required = false) String window,
+            @RequestParam(value = "days", required = false) Integer days) {
+        WindowSpec ws = resolveWindow(window, days);
+        String timeFilter = ws.allTime ? "" : " AND event_time >= ? ";
+        Object[] params = ws.allTime ? new Object[]{siteId} : new Object[]{siteId, ws.timestampSince()};
+
+        Map<String, Object> totals = jdbc.queryForMap(
+                "SELECT count(DISTINCT session_id) FILTER (WHERE event_name = 'content_open') " +
+                "         as \"contentSessions\", " +
+                "       count(DISTINCT session_id) FILTER (WHERE event_name = 'read_progress' " +
+                "         AND properties->>'progressPercent' = '100') as \"completedSessions\", " +
+                "       coalesce(sum(CASE WHEN event_name = 'engaged_time' " +
+                "         AND properties->>'engagedSeconds' ~ '^[0-9]+$' " +
+                "         THEN (properties->>'engagedSeconds')::bigint ELSE 0 END), 0) " +
+                "         as \"engagedSeconds\" " +
+                "FROM public.behavior_events WHERE site_id = ? AND is_bot = false" + timeFilter,
+                params);
+
+        totals = new java.util.LinkedHashMap<>(totals);
+        long contentSessions = longValue(totals.get("contentSessions"));
+        totals.put("completionRate", contentSessions == 0 ? 0.0
+                : (double) longValue(totals.get("completedSessions")) / contentSessions);
+        Map<String, Object> result = Map.of("totals", totals, "window", ws.label);
+        return ResponseEntity.ok(result);
+    }
+
+    /** Recommendation feedback joined by request/model metadata in event properties. */
+    @GetMapping("/visits/recommendations")
+    public ResponseEntity<?> recommendations(
+            @RequestParam(value = "window", required = false) String window,
+            @RequestParam(value = "days", required = false) Integer days) {
+        WindowSpec ws = resolveWindow(window, days);
+        String timeFilter = ws.allTime ? "" : " AND event_time >= ? ";
+        List<Object> base = new ArrayList<>(List.of(siteId));
+        if (!ws.allTime) base.add(ws.timestampSince());
+
+        Map<String, Object> totals = jdbc.queryForMap(
+                "SELECT count(*) FILTER (WHERE event_name = 'recommendation_impression') as \"impressions\", " +
+                "       count(*) FILTER (WHERE event_name = 'recommendation_click') as \"clicks\", " +
+                "       count(*) FILTER (WHERE event_name = 'recommendation_dismiss') as \"dismissals\" " +
+                "FROM public.behavior_events WHERE site_id = ? AND is_bot = false" + timeFilter,
+                base.toArray());
+
+        List<Object> itemParams = new ArrayList<>(base);
+        itemParams.add(minBucketCount);
+        List<Map<String, Object>> items = jdbc.queryForList(
+                "SELECT properties->>'contentId' as \"contentId\", " +
+                " count(*) FILTER (WHERE event_name = 'recommendation_impression') as \"impressions\", " +
+                " count(*) FILTER (WHERE event_name = 'recommendation_click') as \"clicks\" " +
+                "FROM public.behavior_events WHERE site_id = ? AND is_bot = false " +
+                " AND event_name IN ('recommendation_impression','recommendation_click','recommendation_dismiss') " +
+                " AND properties->>'contentId' IS NOT NULL" + timeFilter +
+                " GROUP BY properties->>'contentId' " +
+                " HAVING count(*) FILTER (WHERE event_name = 'recommendation_impression') >= ? " +
+                " ORDER BY count(*) FILTER (WHERE event_name = 'recommendation_click') DESC LIMIT 25",
+                itemParams.toArray());
+
+        totals = new java.util.LinkedHashMap<>(totals);
+        long impressions = longValue(totals.get("impressions"));
+        totals.put("clickThroughRate", impressions == 0 ? 0.0
+                : (double) longValue(totals.get("clicks")) / impressions);
+        return ResponseEntity.ok(Map.of("totals", totals, "items", items,
+                "window", ws.label, "minBucketCount", minBucketCount));
     }
 
     // ────────────────────────────────────────────────────────────────────
@@ -303,10 +437,24 @@ public class PublicVisitsController {
         String timeFilter = ws.allTime ? "" : " AND event_time >= ? ";
         Object[] params = ws.allTime ? new Object[]{siteId} : new Object[]{siteId, ws.timestampSince()};
 
+        List<Object> funnelParams = new ArrayList<>(java.util.Arrays.asList(params));
+        funnelParams.add(minBucketCount);
         List<Map<String, Object>> steps = jdbc.queryForList(
-                "SELECT step_name as \"step\", count(DISTINCT session_id) as \"sessions\" " +
-                "FROM public.funnel_steps WHERE site_id = ?" + timeFilter +
-                " GROUP BY step_name ORDER BY count(DISTINCT session_id) DESC LIMIT 20", params);
+                "WITH first_steps AS (" +
+                " SELECT session_id, step_name, step_order, min(event_time) AS event_time" +
+                " FROM public.funnel_steps WHERE site_id = ?" + timeFilter +
+                " GROUP BY session_id, step_name, step_order" +
+                ") SELECT current.step_name as \"step\", current.step_order as \"stepOrder\"," +
+                " count(DISTINCT current.session_id) as \"sessions\"" +
+                " FROM first_steps current" +
+                " WHERE NOT EXISTS (" +
+                "   SELECT 1 FROM generate_series(1, current.step_order - 1) prior_order" +
+                "   LEFT JOIN first_steps prior ON prior.session_id = current.session_id" +
+                "     AND prior.step_order = prior_order" +
+                "   WHERE prior.event_time IS NULL OR prior.event_time > current.event_time" +
+                " ) GROUP BY current.step_name, current.step_order" +
+                " HAVING count(DISTINCT current.session_id) >= ?" +
+                " ORDER BY current.step_order", funnelParams.toArray());
 
         Map<String, Object> result = Map.of("steps", steps, "window", ws.label);
 
@@ -339,6 +487,7 @@ public class PublicVisitsController {
                 "from public.geo_time_rollups r " +
                 "join public.geo_areas a on a.geo_area_id = r.geo_area_id " +
                 "where r.site_id = ? and r.granularity = '1d' " +
+                "  and r.event_type = 'page_view' " +
                 "  and a.center_lat is not null and a.center_lng is not null ");
 
         List<Object> params = new ArrayList<>();
@@ -373,6 +522,18 @@ public class PublicVisitsController {
         params.add(limit);
 
         return jdbc.queryForList(sql.toString(), params.toArray());
+    }
+
+    private static ResponseEntity<?> cached(ResponseCache.CacheEntry hit, String ifNoneMatch) {
+        if (hit.etag().equals(ifNoneMatch)) {
+            return ResponseEntity.status(HttpStatus.NOT_MODIFIED).eTag(hit.etag()).build();
+        }
+        return ResponseEntity.ok().eTag(hit.etag())
+                .header("Content-Type", "application/json").body(hit.json());
+    }
+
+    private static long longValue(Object value) {
+        return value instanceof Number number ? number.longValue() : 0L;
     }
 
     // ────────────────────────────────────────────────────────────────────

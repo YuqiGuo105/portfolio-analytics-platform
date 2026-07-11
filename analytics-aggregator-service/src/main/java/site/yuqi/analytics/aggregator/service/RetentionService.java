@@ -36,6 +36,9 @@ public class RetentionService {
     private final int batchSize;
     private final int maxPerRun;
 
+    @Value("${analytics.retention.raw-retain-days:30}")
+    private int rawRetainDays = 30;
+
     public RetentionService(
             JdbcTemplate jdbc,
             @Value("${analytics.retention.enabled:true}") boolean enabled,
@@ -92,5 +95,23 @@ public class RetentionService {
 
         log.info("{\"event\":\"retention_done\",\"deleted\":{},\"iterations\":{}}",
                 totalDeleted, iterations);
+    }
+
+    /** Exact raw facts are intentionally short-lived and never used by public APIs. */
+    @Scheduled(cron = "0 45 3 * * *", zone = "UTC")
+    public void purgeStaleRawEvents() {
+        if (!enabled) return;
+        int totalDeleted = 0;
+        while (totalDeleted < maxPerRun) {
+            int deleted = jdbc.update(
+                    "DELETE FROM analytics_private.behavior_events_raw WHERE ctid IN (" +
+                    " SELECT ctid FROM analytics_private.behavior_events_raw" +
+                    " WHERE created_at < now() - make_interval(days => ?) LIMIT ?)",
+                    rawRetainDays, batchSize);
+            totalDeleted += deleted;
+            if (deleted < batchSize) break;
+        }
+        log.info("{\"event\":\"raw_retention_done\",\"deleted\":{},\"retainDays\":{}}",
+                totalDeleted, rawRetainDays);
     }
 }

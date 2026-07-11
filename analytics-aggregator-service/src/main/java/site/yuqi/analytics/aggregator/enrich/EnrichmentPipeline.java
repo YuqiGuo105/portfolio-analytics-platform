@@ -63,9 +63,8 @@ public class EnrichmentPipeline {
             outResult.duplicate = true;
             return null;
         }
-        // Expose the parsed RawEvent so downstream callers (e.g. the batch
-        // consumer that now writes visitor_logs) can persist the raw
-        // source-of-truth row without re-parsing the JSON.
+        // Expose the parsed RawEvent so the consumer can persist the private
+        // exact tier without parsing the Kafka value a second time.
         outResult.rawEvent = raw;
         return enrich(raw);
     }
@@ -75,7 +74,9 @@ public class EnrichmentPipeline {
         UaParserService.Parsed ua = uaParser.parse(raw.uaRaw());
         double botScore = botScorer.score(ua.deviceType(), raw.referrer());
         boolean isBot = botScorer.isBot(botScore);
-        String ipHash = ipHashService.hash(raw.ipRaw());
+        String ipHash = raw.ipHash() != null && !raw.ipHash().isBlank()
+                ? raw.ipHash()
+                : ipHashService.hash(raw.ipRaw());
         EnrichedGeo geo = geoSnap.snap(raw.geoHint());
 
         return new EnrichedEvent(
@@ -95,7 +96,10 @@ public class EnrichmentPipeline {
                 isBot,
                 botScore,
                 ipHash,
-                geo);
+                geo,
+                raw.schemaVersion() == null ? 1 : raw.schemaVersion(),
+                raw.consentState() == null ? "unknown" : raw.consentState(),
+                raw.properties() == null ? java.util.Map.of() : raw.properties());
     }
 
     /** Out-parameter holder so callers can distinguish dedup hits from parse failures. */
@@ -107,8 +111,7 @@ public class EnrichmentPipeline {
          * The parsed {@link RawEvent} — populated on successful parse+dedup
          * (i.e. the same code path that returns a non-null EnrichedEvent).
          * Left null on parse errors, missing-field failures, and dedup hits.
-         * Consumers use this to persist visitor_logs before enrichment
-         * discards the raw ip / geo lat-lng.
+         * Consumers use this only for the access-restricted raw tier.
          */
         public RawEvent rawEvent;
 
@@ -120,4 +123,3 @@ public class EnrichmentPipeline {
         }
     }
 }
-

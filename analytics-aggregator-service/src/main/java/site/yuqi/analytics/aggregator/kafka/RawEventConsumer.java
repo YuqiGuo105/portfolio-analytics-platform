@@ -27,27 +27,13 @@ import java.util.List;
  * <ol>
  *   <li>Parse + enrich every record. Parse failures → DLQ immediately.
  *       Dedup hits and empty payloads are silently dropped. Both the
- *       {@link EnrichedEvent} <b>and</b> the parsed {@link RawEvent}
- *       are collected — the raw form is required to write the raw
- *       source-of-truth row into {@code visitor_logs} before enrichment
- *       discards {@code ipRaw} and coarsens the geo hint.</li>
- *   <li>Persist raw events into {@code visitor_logs} via
- *       {@link VisitorLogPersistService#persistBatch} — one
- *       {@code jdbc.batchUpdate} per poll, idempotent via
- *       {@code ON CONFLICT (event_id) DO NOTHING}. This replaces the
- *       per-request write the Portfolio /api/track endpoint used to do
- *       against Supabase.</li>
- *   <li>Upsert the enriched batch into {@code geo_time_rollups} via
- *       {@link RollupUpsertService#upsertBatch}.</li>
- *   <li>Acknowledge only after BOTH writes succeed. If either throws,
- *       leave the batch un-acked so Kafka re-delivers it. Idempotency:
- *       visitor_logs is guarded by the ON CONFLICT DO NOTHING on
- *       event_id (partial unique index added in V6); rollups are
- *       guarded by the upstream UUIDv7 dedup key in
- *       {@link EnrichmentPipeline#parseAndEnrich} — a redelivered
- *       event fails the {@code DedupService.acquire} check and is
- *       dropped before it reaches the rollup batch, so counters never
- *       double-count.</li>
+ *       {@link EnrichedEvent} <b>and</b> parsed {@link RawEvent} are collected
+ *       for separate private-raw and canonical-fact writes.</li>
+ *   <li>Persist exact raw, sanitized fact, and legacy compatibility rows in one
+ *       idempotent transaction via {@link VisitorLogPersistService}.</li>
+ *   <li>Rebuild affected session projections and configured funnel steps.</li>
+ *   <li>Upsert additive geo rollups last, then acknowledge. On persistence
+ *       failure Redis processing/throttle claims are released for Kafka replay.</li>
  * </ol>
  *
  * <p>The previous single-record listener is preserved as {@link #process}
@@ -77,7 +63,7 @@ public class RawEventConsumer {
         }
 
         List<EnrichedEvent> enriched = new ArrayList<>(records.size());
-        // Parallel list of raw events for the visitor_logs batch insert.
+        // Parallel list of raw events for the access-restricted raw tier.
         // Order does not need to match `enriched` — the two tables are
         // independent — but both lists are populated from the same
         // successful-parse iterations so they stay in lockstep in practice.
@@ -109,7 +95,7 @@ public class RawEventConsumer {
             // Visit throttle: same session+page within 5 min counts as 1.
             // Checked here (before visitor_logs write) so the dashboard TODAY
             // count doesn't increment on rapid page refreshes.
-            if (!dedupService.throttleVisit(ev)) {
+            if ("page_view".equals(ev.eventType()) && !dedupService.throttleVisit(ev)) {
                 log.debug("{\"event\":\"visit_throttled\",\"page\":\"{}\"}", ev.pageUrl());
                 continue;
             }
@@ -123,28 +109,24 @@ public class RawEventConsumer {
         }
 
         try {
-            // Phase 2: raw source-of-truth first. If this throws we do NOT
-            // ack, Kafka replays the batch, and the ON CONFLICT (event_id)
-            // DO NOTHING clause absorbs the retry without duplicates.
-            visitorLogs.persistBatch(rawEvents);
-            // Phase 3: aggregated rollups. Same at-least-once contract —
-            // upstream dedup blocks a replayed event from being counted twice.
+            // Idempotent facts first, then idempotent session projections.
+            // Additive rollups run last so no fallible side effect follows them.
+            visitorLogs.persistBatch(rawEvents, enriched);
+            sessions.processBatch(enriched);
             rollup.upsertBatch(enriched);
-            // Phase 3.5: session aggregation (best-effort — failure here
-            // must NOT block acknowledgement since rollups already committed).
-            try {
-                sessions.processBatch(enriched);
-            } catch (RuntimeException sessionErr) {
-                log.warn("{\"event\":\"session_batch_failed\",\"batchSize\":{},\"err\":\"{}\"}",
-                        enriched.size(), sessionErr.getMessage());
-            }
-            // Phase 4: single ack for the entire poll.
-            ack.acknowledge();
         } catch (RuntimeException dbErr) {
             log.warn("{\"event\":\"batch_persist_failed\",\"batchSize\":{},\"err\":\"{}\"}",
                     enriched.size(), dbErr.getMessage());
+            enriched.forEach(event -> {
+                dedupService.release(event.eventId());
+                dedupService.releaseThrottle(event);
+            });
             // Do NOT ack — let Kafka re-deliver the whole batch.
+            return;
         }
+        // Keep acknowledgement outside the persistence catch. If the broker
+        // rejects the ack, the retained dedup claims make replay a no-op.
+        ack.acknowledge();
     }
 
     /**
@@ -180,4 +162,3 @@ public class RawEventConsumer {
         }
     }
 }
-

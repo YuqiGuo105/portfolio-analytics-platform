@@ -94,6 +94,7 @@ analytics:
   # (see IpRateLimitFilter). Valkey-backed so limits are shared across
   # replicas; falls open on Valkey errors.
   public:
+    min-bucket-count: ${ANALYTICS_PUBLIC_MIN_BUCKET_COUNT:5}
     rate-limit:
       enabled: ${PUBLIC_RATE_LIMIT_ENABLED:true}
       max-per-window: ${PUBLIC_RATE_LIMIT_MAX:120}
@@ -103,6 +104,10 @@ analytics:
       ttl-seconds: ${PUBLIC_CACHE_TTL_SECONDS:30}
   dedup:
     ttl-seconds: ${ANALYTICS_DEDUP_TTL_SECONDS:86400}
+    throttle-seconds: ${ANALYTICS_THROTTLE_SECONDS:300}
+  funnel:
+    # Ordered business events. URL paths are dimensions, never funnel definitions.
+    steps: ${ANALYTICS_FUNNEL_STEPS:content_open,read_progress,subscribe_started,subscribe_verified}
   backfill:
     # When true on startup, BackfillRunner reads from the existing
     # visitor_logs / visitor_clicks tables and replays them through the
@@ -114,6 +119,7 @@ analytics:
   retention:
     enabled: ${ANALYTICS_RETENTION_ENABLED:true}
     five-min-retain-days: ${ANALYTICS_RETENTION_5M_DAYS:3}
+    raw-retain-days: ${ANALYTICS_RAW_RETENTION_DAYS:30}
     batch-size: ${ANALYTICS_RETENTION_BATCH:2000}
     max-per-run: ${ANALYTICS_RETENTION_MAX:50000}
 

@@ -174,7 +174,7 @@ class RawEventConsumerTest {
             pr.rawEvent = raw;
             return enriched;
         }).when(pipeline).parseAndEnrich(anyString(), any(EnrichmentPipeline.ParseResult.class));
-        doNothing().when(visitorLogs).persistBatch(anyList());
+        doNothing().when(visitorLogs).persistBatch(anyList(), anyList());
         doNothing().when(rollup).upsertBatch(anyList());
 
         Acknowledgment ack = mock(Acknowledgment.class);
@@ -183,8 +183,9 @@ class RawEventConsumerTest {
         // Persist must happen before rollup so that a rollup failure leaves
         // visitor_logs already written (idempotent via ON CONFLICT); a
         // persist failure leaves rollup untouched.
-        InOrder inOrder = inOrder(visitorLogs, rollup, ack);
-        inOrder.verify(visitorLogs).persistBatch(anyList());
+        InOrder inOrder = inOrder(visitorLogs, sessions, rollup, ack);
+        inOrder.verify(visitorLogs).persistBatch(anyList(), anyList());
+        inOrder.verify(sessions).processBatch(anyList());
         inOrder.verify(rollup).upsertBatch(anyList());
         inOrder.verify(ack).acknowledge();
         verify(dlq, never()).publish(any(), any(), any());
@@ -201,12 +202,13 @@ class RawEventConsumerTest {
             return enriched;
         }).when(pipeline).parseAndEnrich(anyString(), any(EnrichmentPipeline.ParseResult.class));
         doThrow(new RuntimeException("visitor_logs write failed"))
-                .when(visitorLogs).persistBatch(anyList());
+                .when(visitorLogs).persistBatch(anyList(), anyList());
 
         Acknowledgment ack = mock(Acknowledgment.class);
         consumer.onMessage(List.of(record("k", "{}", 1L)), ack);
 
-        verify(visitorLogs, times(1)).persistBatch(anyList());
+        verify(visitorLogs, times(1)).persistBatch(anyList(), anyList());
+        verify(sessions,    never()).processBatch(anyList());
         verify(rollup,      never()).upsertBatch(anyList());
         verify(ack,         never()).acknowledge();
         verify(dlq,         never()).publish(any(), any(), any());
@@ -235,7 +237,8 @@ class RawEventConsumerTest {
         ), ack);
 
         verify(dlq,         times(1)).publish(eq("kbad"), eq("bad"), anyString());
-        verify(visitorLogs, times(1)).persistBatch(anyList());
+        verify(visitorLogs, times(1)).persistBatch(anyList(), anyList());
+        verify(sessions,    times(1)).processBatch(anyList());
         verify(rollup,      times(1)).upsertBatch(anyList());  // good record still processed
         verify(ack,         times(1)).acknowledge();
     }
@@ -250,13 +253,15 @@ class RawEventConsumerTest {
             pr.rawEvent = raw;
             return enriched;
         }).when(pipeline).parseAndEnrich(anyString(), any(EnrichmentPipeline.ParseResult.class));
-        doNothing().when(visitorLogs).persistBatch(anyList());
+        doNothing().when(visitorLogs).persistBatch(anyList(), anyList());
         doThrow(new RuntimeException("db gone")).when(rollup).upsertBatch(anyList());
 
         Acknowledgment ack = mock(Acknowledgment.class);
         consumer.onMessage(List.of(record("k", "{}", 1L)), ack);
 
         verify(ack, never()).acknowledge();
+        verify(dedupService).release(enriched.eventId());
+        verify(dedupService).releaseThrottle(enriched);
         verify(dlq, never()).publish(any(), any(), any());
     }
 

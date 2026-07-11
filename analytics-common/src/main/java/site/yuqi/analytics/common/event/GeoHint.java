@@ -8,8 +8,8 @@ import com.fasterxml.jackson.annotation.JsonInclude;
  *
  * <p>The enrichment service treats this as an advisory input — if the
  * MaxMind GeoIP lookup on {@code ipRaw} disagrees with the hint, the
- * MaxMind result wins (the edge header is easier to spoof). Latitude and
- * longitude here are <b>not</b> retained past enrichment.
+ * MaxMind result wins (the edge header is easier to spoof). Exact values may
+ * only be retained in the restricted raw tier; serving facts use snapped geo.
  */
 @JsonInclude(JsonInclude.Include.NON_NULL)
 public record GeoHint(

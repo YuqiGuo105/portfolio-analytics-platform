@@ -22,7 +22,8 @@ flowchart LR
         direction TB
         dash["DashboardPanels<br/>globe + KPIs + 'More' button"]:::ui
         analyticsPage["/analytics page<br/>globe + drill-down"]:::ui
-        ingest["/api/track<br/>Ingestion endpoint"]:::api
+            sdk["Behavior SDK<br/>session + engagement"]:::comp
+            ingest["/api/track<br/>schema + allowlist"]:::api
         proxy["/api/analytics/[...path]<br/>same-origin read proxy"]:::api
     end
 
@@ -44,6 +45,7 @@ flowchart LR
             pipeline["EnrichmentPipeline<br/>parse · UA · bot · HMAC ip_hash · GeoSnap to METRO"]:::comp
             dedupSvc["DedupService<br/>SETNX guard"]:::comp
             rollup["RollupUpsertService<br/>5m + 1d UPSERT"]:::comp
+            sessionizer["SessionAggregatorService<br/>session + ordered funnel"]:::comp
             backfill["BackfillService + Runner<br/>visitor_logs / clicks → pipeline → upsert"]:::comp
             publicApi["PublicVisitsController<br/>GET /api/public/visits/*"]:::comp
             dlqProd["DlqProducer"]:::comp
@@ -62,6 +64,9 @@ flowchart LR
         direction TB
         geoAreas[("geo_areas<br/>dimension")]:::db
         rollups[("geo_time_rollups<br/>5m + 1d fact")]:::db
+        behavior[("behavior_events<br/>canonical behavior fact")]:::db
+        rawBehavior[("analytics_private.behavior_events_raw<br/>exact · restricted · 30d")]:::db
+        sessions[("sessions · funnel_steps<br/>replay-safe projections")]:::db
         alertTbl[("alert_rules · incidents")]:::db
         legacyLogs[("visitor_logs · visitor_clicks<br/>legacy truth of result")]:::db
     end
@@ -70,13 +75,18 @@ flowchart LR
     notif(["portfolio-notification-service<br/>POST /api/content-events"]):::ext
 
     %% ─────────── live ingest path ───────────
-    visitor -- "page_view / click (beacon)" --> ingest
+    visitor --> sdk
+    sdk -- "versioned behavior events" --> ingest
     ingest -- "produce JSON RawEvent" --> kraw
     kraw --> consumer
     consumer -- "parse + enrich" --> pipeline
     pipeline -. "SETNX event_id (fail-open)" .-> dedupSvc
     dedupSvc <--> redis
     pipeline -- "EnrichedEvent" --> rollup
+    consumer -- "exact internal context" --> rawBehavior
+    consumer -- "sanitized event fact" --> behavior
+    consumer --> sessionizer
+    sessionizer --> sessions
     rollup -- "INSERT ... ON CONFLICT" --> rollups
     consumer -. "parse/missing field" .-> dlqProd
     dlqProd --> kdlq
@@ -172,16 +182,19 @@ wire surface to exactly:
 - `analytics.raw.events` — every event from the Ingestion API
 - `analytics.events.dlq` — poison-pill records
 
-### Privacy invariants enforced in code
+### Data-access boundaries
 
-- **No raw IP survives enrichment.** `EnrichedEvent` literally has no
-  `ipRaw` field; only `ipHash = HMAC-SHA-256(salt, ipRaw)`.
-- **METRO is the smallest spatial bucket.** No city / postcode / IP-block
-  data is persisted anywhere.
-- **Lat/lng exposed to the dashboard always come from
-  `geo_areas.center_lat / center_lng`**, never from a visitor row.
-- Salt rotation (`ANALYTICS_HMAC_SALT`) instantly invalidates all
-  historical `ip_hash` joins — the intended privacy escape hatch.
+- `analytics_private.behavior_events_raw` is the only exact tier. It may
+  contain request IP, raw UA, city and coordinates for internal analysis,
+  is inaccessible to `PUBLIC`/browser roles, and expires after 30 days by default.
+- `public.behavior_events` is the canonical source for sessions, funnels,
+  content performance and recommendation features. It contains HMAC identity,
+  URL paths, referrer domains and at most the enriched geo bucket.
+- Public Web and MCP routes query rollups/canonical facts only. Public lists
+  suppress buckets smaller than `ANALYTICS_PUBLIC_MIN_BUCKET_COUNT` (default 5).
+- Dashboard coordinates come from `geo_areas` centroids, never an exact raw row.
+- `visitor_logs` remains a compatibility sink but receives HMAC IP and no exact
+  city/coordinates; direct browser `SELECT` grants are revoked by migration V8.
 
 ---
 
@@ -265,6 +278,19 @@ pins. METRO buckets win over their COUNTRY parents when seeded.
   "timeSeries":   [ { "bucketTime": "2025-01-01T00:00:00Z", "count": 40 } ]
 }
 ```
+
+### Behavior analysis endpoints
+
+- `GET /api/public/visits/top-pages?window=7d` returns up to 25 page buckets.
+- `GET /api/public/visits/referrers?window=7d` returns referrer domains only.
+- `GET /api/public/visits/sessions?window=30d` returns duration/bounce aggregates.
+- `GET /api/public/visits/funnel?window=30d` returns configured ordered steps.
+- `GET /api/public/visits/engagement?window=30d` returns reading/active-time totals.
+- `GET /api/public/visits/recommendations?window=30d` returns recommendation feedback.
+
+All list endpoints exclude bots where applicable and suppress small buckets in SQL.
+Funnel order is configured with `ANALYTICS_FUNNEL_STEPS`; URL paths never define
+business funnel semantics.
 
 Feeds the `/analytics` page on the Portfolio dashboard.
 

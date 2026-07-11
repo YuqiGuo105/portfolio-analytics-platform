@@ -1,168 +1,121 @@
 package site.yuqi.analytics.aggregator.service;
 
 import lombok.RequiredArgsConstructor;
-import lombok.extern.slf4j.Slf4j;
+import org.springframework.beans.factory.annotation.Value;
 import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.stereotype.Service;
+import org.springframework.transaction.annotation.Transactional;
 import site.yuqi.analytics.common.event.EnrichedEvent;
 
 import java.sql.Timestamp;
-import java.time.Duration;
-import java.time.Instant;
-import java.util.HashMap;
+import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 
-/**
- * Aggregates enriched events into per-session rows in the
- * {@code sessions} table and records funnel steps in
- * {@code funnel_steps}.
- *
- * <p>Uses an UPSERT (INSERT ... ON CONFLICT UPDATE) on
- * {@code (session_id, site_id)} so multiple batches can incrementally
- * update the same session as more events arrive.
- *
- * <p>Funnel steps are only recorded for specific event types that
- * matter for conversion tracking: {@code page_view} and {@code click}.
- */
+/** Builds replay-safe session and configured funnel projections from behavior facts. */
 @Service
 @RequiredArgsConstructor
-@Slf4j
 public class SessionAggregatorService {
 
-    private final JdbcTemplate jdbc;
+    private static final String SELECT_SESSION = """
+            select min(event_time) as first_event,
+                   max(event_time) as last_event,
+                   count(*) filter (where event_name = 'page_view') as page_views,
+                   count(*) filter (where event_name in
+                     ('outbound_link_clicked','search_result_clicked','recommendation_click')) as clicks,
+                   (array_agg(page_path order by event_time asc)
+                     filter (where page_path is not null))[1] as entry_page,
+                   (array_agg(page_path order by event_time desc)
+                     filter (where page_path is not null))[1] as exit_page,
+                   max(anon_id_hash) as anon_id,
+                   max(device_type) as device_type,
+                   max(browser) as browser,
+                   max(os) as os,
+                   max(country) as country,
+                   max(geo_area_id) as geo_area_id
+              from public.behavior_events
+             where site_id = ? and session_id = ?
+            """;
 
     private static final String UPSERT_SESSION = """
-            INSERT INTO public.sessions
+            insert into public.sessions
               (session_id, site_id, anon_id, first_event, last_event,
                page_views, clicks, duration_ms, entry_page, exit_page,
                device_type, browser, os, country, geo_area_id)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-            ON CONFLICT (session_id, site_id) DO UPDATE SET
-              last_event   = GREATEST(sessions.last_event, EXCLUDED.last_event),
-              page_views   = sessions.page_views + EXCLUDED.page_views,
-              clicks       = sessions.clicks + EXCLUDED.clicks,
-              duration_ms  = EXTRACT(EPOCH FROM (GREATEST(sessions.last_event, EXCLUDED.last_event)
-                             - sessions.first_event)) * 1000,
-              exit_page    = EXCLUDED.exit_page
+            values (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            on conflict (session_id, site_id) do update set
+              anon_id = excluded.anon_id,
+              first_event = excluded.first_event,
+              last_event = excluded.last_event,
+              page_views = excluded.page_views,
+              clicks = excluded.clicks,
+              duration_ms = excluded.duration_ms,
+              entry_page = excluded.entry_page,
+              exit_page = excluded.exit_page,
+              device_type = excluded.device_type,
+              browser = excluded.browser,
+              os = excluded.os,
+              country = excluded.country,
+              geo_area_id = excluded.geo_area_id
             """;
 
     private static final String INSERT_FUNNEL_STEP = """
-            INSERT INTO public.funnel_steps
-              (session_id, site_id, step_name, page_url, event_type, event_time, step_order)
-            VALUES (?, ?, ?, ?, ?, ?, ?)
-            ON CONFLICT DO NOTHING
+            insert into public.funnel_steps
+              (event_id, session_id, site_id, step_name, page_url, event_type, event_time, step_order)
+            values (?, ?, ?, ?, ?, ?, ?, ?)
+            on conflict (event_id) where event_id is not null do nothing
             """;
 
-    /**
-     * Process a batch of enriched events: group by session, upsert
-     * session rows, and insert funnel steps.
-     */
+    private final JdbcTemplate jdbc;
+
+    @Value("${analytics.funnel.steps:content_open,read_progress,subscribe_started,subscribe_verified}")
+    private List<String> configuredSteps;
+
+    @Transactional
     public void processBatch(List<EnrichedEvent> events) {
         if (events == null || events.isEmpty()) return;
 
-        // Group events by session
-        Map<String, List<EnrichedEvent>> bySession = new HashMap<>();
-        for (EnrichedEvent e : events) {
-            String key = resolveSessionKey(e);
-            if (key == null) continue;
-            bySession.computeIfAbsent(key, k -> new java.util.ArrayList<>()).add(e);
+        Map<String, String> sessions = new LinkedHashMap<>();
+        for (EnrichedEvent event : events) {
+            String key = resolveSessionKey(event);
+            if (key != null) sessions.put(key, event.siteId());
         }
+        sessions.forEach(this::rebuildSession);
 
-        // Upsert each session and insert funnel steps
-        for (var entry : bySession.entrySet()) {
-            String sessionKey = entry.getKey();
-            List<EnrichedEvent> sessionEvents = entry.getValue();
-            upsertSession(sessionKey, sessionEvents);
-            insertFunnelSteps(sessionKey, sessionEvents);
-        }
-    }
-
-    private void upsertSession(String sessionKey, List<EnrichedEvent> events) {
-        EnrichedEvent first = events.get(0);
-        String siteId = first.siteId();
-
-        Instant firstTime = events.stream().map(EnrichedEvent::eventTime).min(Instant::compareTo).orElse(first.eventTime());
-        Instant lastTime = events.stream().map(EnrichedEvent::eventTime).max(Instant::compareTo).orElse(first.eventTime());
-
-        long pageViews = events.stream().filter(e -> "page_view".equals(e.eventType())).count();
-        long clicks = events.stream().filter(e -> "click".equals(e.eventType())).count();
-        long durationMs = Duration.between(firstTime, lastTime).toMillis();
-
-        // Entry page = first event's pageUrl, exit page = last event's pageUrl
-        String entryPage = events.stream()
-                .min((a, b) -> a.eventTime().compareTo(b.eventTime()))
-                .map(EnrichedEvent::pageUrl).orElse(null);
-        String exitPage = events.stream()
-                .max((a, b) -> a.eventTime().compareTo(b.eventTime()))
-                .map(EnrichedEvent::pageUrl).orElse(null);
-
-        String country = first.geo() != null ? first.geo().country() : null;
-        String geoAreaId = first.geo() != null ? first.geo().geoAreaId() : null;
-
-        try {
-            jdbc.update(UPSERT_SESSION,
-                    sessionKey, siteId, first.anonId(),
-                    Timestamp.from(firstTime), Timestamp.from(lastTime),
-                    (int) pageViews, (int) clicks, durationMs,
-                    entryPage, exitPage,
-                    first.deviceType(), first.browser(), first.os(),
-                    country, geoAreaId);
-        } catch (RuntimeException e) {
-            log.warn("{\"event\":\"session_upsert_error\",\"sessionId\":\"{}\",\"err\":\"{}\"}",
-                    sessionKey, e.getMessage());
+        for (EnrichedEvent event : events) {
+            String sessionKey = resolveSessionKey(event);
+            int stepOrder = configuredSteps.indexOf(event.eventType());
+            if (sessionKey == null || stepOrder < 0) continue;
+            jdbc.update(INSERT_FUNNEL_STEP,
+                    event.eventId(), sessionKey, event.siteId(), event.eventType(),
+                    event.pageUrl(), event.eventType(), Timestamp.from(event.eventTime()), stepOrder + 1);
         }
     }
 
-    private void insertFunnelSteps(String sessionKey, List<EnrichedEvent> events) {
-        int stepOrder = 0;
-        for (EnrichedEvent e : events) {
-            if (!"page_view".equals(e.eventType()) && !"click".equals(e.eventType())) {
-                continue;
-            }
-            String stepName = deriveFunnelStep(e);
-            try {
-                jdbc.update(INSERT_FUNNEL_STEP,
-                        sessionKey, e.siteId(), stepName,
-                        e.pageUrl(), e.eventType(),
-                        Timestamp.from(e.eventTime()), stepOrder++);
-            } catch (RuntimeException ex) {
-                log.warn("{\"event\":\"funnel_step_error\",\"sessionId\":\"{}\",\"err\":\"{}\"}",
-                        sessionKey, ex.getMessage());
-            }
-        }
+    private void rebuildSession(String sessionKey, String siteId) {
+        Map<String, Object> row = jdbc.queryForMap(SELECT_SESSION, siteId, sessionKey);
+        Timestamp first = (Timestamp) row.get("first_event");
+        Timestamp last = (Timestamp) row.get("last_event");
+        if (first == null || last == null) return;
+        long durationMs = Math.max(0, last.getTime() - first.getTime());
+
+        jdbc.update(UPSERT_SESSION,
+                sessionKey, siteId, row.get("anon_id"), first, last,
+                number(row.get("page_views")), number(row.get("clicks")), durationMs,
+                row.get("entry_page"), row.get("exit_page"), row.get("device_type"),
+                row.get("browser"), row.get("os"), row.get("country"), row.get("geo_area_id"));
     }
 
-    /**
-     * Derive a funnel step name from the event. Uses the page path as a
-     * meaningful step name (e.g. "/", "/works", "/cv" → "home", "works", "cv").
-     */
-    private String deriveFunnelStep(EnrichedEvent e) {
-        String url = e.pageUrl();
-        if (url == null || url.isBlank()) return "unknown";
-
-        // Strip domain, keep path
-        String path = url;
-        int schemeEnd = url.indexOf("://");
-        if (schemeEnd > 0) {
-            int pathStart = url.indexOf('/', schemeEnd + 3);
-            path = pathStart > 0 ? url.substring(pathStart) : "/";
-        }
-
-        // Normalize path → step name
-        if ("/".equals(path) || path.isBlank()) return "home";
-        // Remove leading slash and trailing slash
-        String step = path.replaceAll("^/|/$", "");
-        // Take first path segment only
-        int slash = step.indexOf('/');
-        if (slash > 0) step = step.substring(0, slash);
-        return step.isEmpty() ? "home" : step;
+    private static int number(Object value) {
+        return value instanceof Number number ? number.intValue() : 0;
     }
 
-    private String resolveSessionKey(EnrichedEvent e) {
-        if (e.sessionId() != null && !e.sessionId().isBlank()) return e.sessionId();
-        if (e.anonId() != null && !e.anonId().isBlank()) return e.anonId();
-        if (e.ipHash() != null && !e.ipHash().isBlank()) return e.ipHash();
-        return null;
+    private static String resolveSessionKey(EnrichedEvent event) {
+        if (event.sessionId() != null && !event.sessionId().isBlank()) return event.sessionId();
+        if (event.anonId() != null && !event.anonId().isBlank()) return event.anonId();
+        if (event.ipHash() == null || event.ipHash().isBlank()) return null;
+        String device = event.deviceType() == null || event.deviceType().isBlank()
+                ? "unknown" : event.deviceType();
+        return event.ipHash() + ":" + device;
     }
 }

@@ -32,6 +32,7 @@ class PublicVisitsControllerTest {
         ResponseCache cache = new ResponseCache(redis, new ObjectMapper(), false, 30);
         ctrl = new PublicVisitsController(jdbc, cache);
         org.springframework.test.util.ReflectionTestUtils.setField(ctrl, "siteId", "yuqi.site");
+        org.springframework.test.util.ReflectionTestUtils.setField(ctrl, "minBucketCount", 5);
     }
 
     @SuppressWarnings("unchecked")
@@ -86,5 +87,52 @@ class PublicVisitsControllerTest {
         ResponseEntity<?> resp = ctrl.summary("all", null, null);
         Map<String, Object> out = (Map<String, Object>) resp.getBody();
         assertThat(out).containsEntry("window", "all").containsEntry("days", 0);
+    }
+
+    @SuppressWarnings("unchecked")
+    @Test
+    void topPagesReturnsOnlyBackendFilteredBuckets() {
+        when(jdbc.queryForList(anyString(), any(Object[].class)))
+                .thenReturn(List.of(Map.of("page", "/blog/a", "views", 12L, "uniqueSessions", 8L)));
+
+        ResponseEntity<?> resp = ctrl.topPages("7d", null, null);
+        Map<String, Object> out = (Map<String, Object>) resp.getBody();
+
+        assertThat(out).containsEntry("window", "7d").containsEntry("minBucketCount", 5);
+        assertThat((List<?>) out.get("items")).hasSize(1);
+    }
+
+    @SuppressWarnings("unchecked")
+    @Test
+    void referrersNeverReturnsFullUrls() {
+        when(jdbc.queryForList(anyString(), any(Object[].class)))
+                .thenReturn(List.of(Map.of("referrer", "google.com", "count", 9L)));
+
+        Map<String, Object> out = (Map<String, Object>) ctrl.referrers("7d", null, null).getBody();
+        Map<String, Object> first = (Map<String, Object>) ((List<?>) out.get("items")).get(0);
+        assertThat(first).containsEntry("referrer", "google.com");
+    }
+
+    @SuppressWarnings("unchecked")
+    @Test
+    void engagementComputesCompletionRate() {
+        when(jdbc.queryForMap(anyString(), any(Object[].class))).thenReturn(Map.of(
+                "contentSessions", 10L, "completedSessions", 4L, "engagedSeconds", 300L));
+
+        Map<String, Object> body = (Map<String, Object>) ctrl.engagement("30d", null).getBody();
+        Map<String, Object> totals = (Map<String, Object>) body.get("totals");
+        assertThat(totals).containsEntry("completionRate", 0.4d);
+    }
+
+    @SuppressWarnings("unchecked")
+    @Test
+    void recommendationsComputesCtrAndSuppressesItemsInSql() {
+        when(jdbc.queryForMap(anyString(), any(Object[].class)))
+                .thenReturn(Map.of("impressions", 20L, "clicks", 5L, "dismissals", 1L));
+        when(jdbc.queryForList(anyString(), any(Object[].class))).thenReturn(List.of());
+
+        Map<String, Object> body = (Map<String, Object>) ctrl.recommendations("30d", null).getBody();
+        Map<String, Object> totals = (Map<String, Object>) body.get("totals");
+        assertThat(totals).containsEntry("clickThroughRate", 0.25d);
     }
 }

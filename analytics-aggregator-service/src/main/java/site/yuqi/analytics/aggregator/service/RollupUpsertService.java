@@ -165,18 +165,14 @@ public class RollupUpsertService {
     /**
      * 解析最佳会话身份标识：sessionId > anonId > ipHash + 设备类型。
      *
-     * <p>当前前端尚未落地稳定的 anonId/sessionId cookie，所有请求的
-     * sessionId 和 anonId 字段均为空，永远 fallback 到 ipHash。
-     * 为使同一 IP 下不同设备被计为不同 unique visitor，在 fallback
-     * 到 ipHash 时追加设备类型 (desktop/mobile/tablet)。
+     * <p>Schema-v2 前端发送稳定的 anonId 与 30 分钟 sessionId。旧事件、
+     * 拒绝持久标识的请求以及 backfill 仍会 fallback 到 ipHash + device。
      *
      * <p>粒度选择：按 deviceType 区分，不按 browser/os 区分。
      * 即：电脑访问 + 手机访问 = 2 个 unique session；
      * 手机上换浏览器仍算 1 个 unique session（同一设备）。
      *
-     * <p><b>注意</b>：这是 anonId/sessionId cookie 落地前的 best-effort
-     * 近似方案。真正的长期修复是前端设置稳定的 anonId（设备级）+
-     * sessionId（会话级），使身份不再依赖 IP。
+     * <p>Fallback 只是历史兼容，新的行为分析不依赖 IP 作为主身份。
      */
     private static String resolveSessionKey(EnrichedEvent e) {
         if (e.sessionId() != null && !e.sessionId().isBlank()) return e.sessionId();
