@@ -1,0 +1,114 @@
+name: Deploy analytics-aggregator-service
+
+on:
+  workflow_run:
+    workflows: ["ci"]
+    branches: [main]
+    types: [completed]
+
+  workflow_dispatch:
+    inputs:
+      image_tag:
+        description: "Image tag override (optional). Defaults to sha-<short-sha>."
+        required: false
+        type: string
+
+permissions:
+  contents: read
+  id-token: write
+
+env:
+  PROJECT_ID:        portfolio-notify-prod
+  REGION:            us-central1
+  ARTIFACT_REPO:     portfolio
+  IMAGE_NAME:        portfolio-analytics-aggregator
+  SERVICE_NAME:      portfolio-analytics-aggregator
+  WIF_PROVIDER:      ${{ vars.WIF_PROVIDER }}
+  DEPLOYER_SA_EMAIL: ${{ vars.DEPLOYER_SA_EMAIL }}
+  RUNTIME_SA_EMAIL:  notification-runtime@portfolio-notify-prod.iam.gserviceaccount.com
+
+jobs:
+  deploy:
+    if: >
+      github.event_name != 'workflow_run' ||
+      github.event.workflow_run.conclusion == 'success'
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up JDK 21
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "21"
+          cache: maven
+
+      - name: Compute image tag
+        id: tag
+        run: |
+          if [ -n "${{ github.event.inputs.image_tag }}" ]; then
+            TAG="${{ github.event.inputs.image_tag }}"
+          else
+            TAG="sha-$(echo "${GITHUB_SHA}" | cut -c1-7)"
+          fi
+          echo "tag=${TAG}" >> "$GITHUB_OUTPUT"
+
+      - name: Authenticate to Google Cloud (Workload Identity Federation)
+        uses: google-github-actions/auth@v2
+        with:
+          workload_identity_provider: ${{ env.WIF_PROVIDER }}
+          service_account: ${{ env.DEPLOYER_SA_EMAIL }}
+
+      - name: Set up gcloud
+        uses: google-github-actions/setup-gcloud@v2
+
+      - name: Configure Docker for Artifact Registry
+        run: gcloud auth configure-docker ${REGION}-docker.pkg.dev --quiet
+
+      - name: Build & push image
+        run: |
+          IMAGE="${REGION}-docker.pkg.dev/${PROJECT_ID}/${ARTIFACT_REPO}/${IMAGE_NAME}:${{ steps.tag.outputs.tag }}"
+          docker build \
+            -f analytics-aggregator-service/Dockerfile \
+            -t "${IMAGE}" .
+          docker push "${IMAGE}"
+          echo "IMAGE=${IMAGE}" >> "$GITHUB_ENV"
+
+      - name: Deploy to Cloud Run
+        run: |
+          gcloud run deploy "${SERVICE_NAME}" \
+            --image="${IMAGE}" \
+            --region="${REGION}" \
+            --project="${PROJECT_ID}" \
+            --service-account="${RUNTIME_SA_EMAIL}" \
+            --allow-unauthenticated \
+            --port=8093 \
+            --min-instances=0 \
+            --max-instances=2 \
+            --memory=1Gi \
+            --cpu=1 \
+            --timeout=120 \
+            --set-env-vars="^|^KAFKA_SECURITY_PROTOCOL=SASL_SSL|KAFKA_SASL_MECHANISM=SCRAM-SHA-256|KAFKA_TRUSTSTORE_TYPE=PEM|ANALYTICS_TOPIC_RAW=analytics.raw.events|ANALYTICS_TOPIC_DLQ=analytics.events.dlq|ANALYTICS_CONSUMER_ENABLED=true|ANALYTICS_BACKFILL_ENABLED=false|ANALYTICS_BACKFILL_SITE_ID=yuqi.site|ANALYTICS_DEDUP_TTL_SECONDS=86400|ANALYTICS_RAW_RETENTION_DAYS=30|ANALYTICS_PUBLIC_MIN_BUCKET_COUNT=5|ANALYTICS_FUNNEL_STEPS=content_open,read_progress,subscribe_started,subscribe_verified" \
+            --update-secrets="SPRING_DATASOURCE_URL=SPRING_DATASOURCE_URL:latest,SPRING_DATASOURCE_USERNAME=SPRING_DATASOURCE_USERNAME:latest,SPRING_DATASOURCE_PASSWORD=SPRING_DATASOURCE_PASSWORD:latest,KAFKA_BROKERS=ANALYTICS_KAFKA_BROKERS:latest,KAFKA_USERNAME=ANALYTICS_KAFKA_USERNAME:latest,KAFKA_PASSWORD=ANALYTICS_KAFKA_PASSWORD:latest,KAFKA_CA_CERT=ANALYTICS_KAFKA_CA_CERT:latest,ANALYTICS_HMAC_SALT=ANALYTICS_HMAC_SALT:latest,VALKEY_URL=VALKEY_URL:latest"
+
+      - name: Smoke test (wait for ready revision)
+        run: |
+          for i in $(seq 1 30); do
+            LATEST_READY=$(gcloud run services describe "${SERVICE_NAME}" \
+              --region="${REGION}" --project="${PROJECT_ID}" \
+              --format='value(status.latestReadyRevisionName)')
+            LATEST_CREATED=$(gcloud run services describe "${SERVICE_NAME}" \
+              --region="${REGION}" --project="${PROJECT_ID}" \
+              --format='value(status.latestCreatedRevisionName)')
+            echo "ready=${LATEST_READY} created=${LATEST_CREATED}"
+            if [ -n "${LATEST_READY}" ] && [ "${LATEST_READY}" = "${LATEST_CREATED}" ]; then
+              echo "Revision ${LATEST_READY} is ready."
+              exit 0
+            fi
+            sleep 5
+          done
+          echo "Latest revision never became ready in time."
+          exit 1
