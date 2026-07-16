@@ -11,5 +11,6 @@ public record AlertRule(
         long threshold,
         String comparator,
         int cooldownSeconds,
-        boolean enabled
+        boolean enabled,
+        int version
 ) {}

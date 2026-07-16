@@ -100,6 +100,6 @@ class AlertEvaluatorTest {
     private static AlertRule sampleRule(long threshold, String cmp) {
         return new AlertRule(
                 42L, "yuqi.site", "spike", "page_view", "GLOBAL", null,
-                "5m", threshold, cmp, 60, true);
+                "5m", threshold, cmp, 60, true, 1);
     }
 }

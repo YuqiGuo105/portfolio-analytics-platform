@@ -31,7 +31,8 @@ public class AlertRuleRepository {
             rs.getLong("threshold"),
             rs.getString("comparator"),
             rs.getInt("cooldown_seconds"),
-            rs.getBoolean("enabled"));
+            rs.getBoolean("enabled"),
+            rs.getInt("version"));
 
     public List<AlertRule> findAll() {
         return jdbc.query("select * from alert_rules order by rule_id", MAPPER);
@@ -71,7 +72,7 @@ public class AlertRuleRepository {
                 update alert_rules set
                     site_id = ?, name = ?, event_type = ?, geo_level = ?, geo_area_id = ?,
                     granularity = ?, threshold = ?, comparator = ?, cooldown_seconds = ?,
-                    updated_at = now()
+                    version = version + 1, updated_at = now()
                 where rule_id = ?
                 """,
                 r.siteId(), r.name(), r.eventType(), r.geoLevel(),
@@ -81,10 +82,38 @@ public class AlertRuleRepository {
         return rows == 0 ? Optional.empty() : findById(id);
     }
 
+    /**
+     * Optimistic-locking update: only succeeds if current version matches expectedVersion.
+     */
+    public Optional<AlertRule> updateWithVersion(long id, AlertRuleRequest r, int expectedVersion) {
+        int rows = jdbc.update("""
+                update alert_rules set
+                    site_id = ?, name = ?, event_type = ?, geo_level = ?, geo_area_id = ?,
+                    granularity = ?, threshold = ?, comparator = ?, cooldown_seconds = ?,
+                    version = version + 1, updated_at = now()
+                where rule_id = ? and version = ?
+                """,
+                r.siteId(), r.name(), r.eventType(), r.geoLevel(),
+                r.geoAreaId() == null ? "" : r.geoAreaId(),
+                r.granularity(), r.threshold(), r.comparator(), r.cooldownSeconds(),
+                id, expectedVersion);
+        if (rows == 0) return Optional.empty();
+        return findById(id);
+    }
+
     public boolean setEnabled(long id, boolean enabled) {
         return jdbc.update(
-                "update alert_rules set enabled = ?, updated_at = now() where rule_id = ?",
+                "update alert_rules set enabled = ?, version = version + 1, updated_at = now() where rule_id = ?",
                 enabled, id) > 0;
+    }
+
+    /**
+     * Optimistic-locking setEnabled.
+     */
+    public boolean setEnabledWithVersion(long id, boolean enabled, int expectedVersion) {
+        return jdbc.update(
+                "update alert_rules set enabled = ?, version = version + 1, updated_at = now() where rule_id = ? and version = ?",
+                enabled, id, expectedVersion) > 0;
     }
 
     public boolean delete(long id) {
