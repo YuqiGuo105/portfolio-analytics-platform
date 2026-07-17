@@ -15,11 +15,12 @@ window before the USD 50 ceiling.
 | Other Cloud Run traffic | $0-7 | Scale to zero and one maximum instance |
 | Artifact Registry and network | $1-3 | Cleanup policy and low traffic allowance |
 | Operational reserve | $4-8 | Absorbs cold starts, retries, and price variance |
-| Aiven, Supabase, Vercel, Grafana | $0 | Free plans only |
+| Aiven, Supabase, Vercel, Grafana | $0 | Free plans confirmed on 2026-07-17 |
 
-Expected total: about USD 32-42 per month. A paid external database, search,
-Kafka, hosting, or observability plan is outside this envelope and must be
-approved before activation.
+Expected total: about USD 32-42 per month. Kafka, OpenSearch, Valkey, Supabase,
+Vercel, and Grafana are confirmed to be on free plans. A future paid database,
+search, cache, hosting, or observability plan is outside this envelope and must
+be approved before activation.
 
 ## Runtime policy
 
@@ -61,12 +62,13 @@ unexpected service is never modified silently.
 
 ## External service requirements
 
-- Keep exactly one free Aiven service of each type where the account permits it.
-- Confirm both configured OpenSearch hostnames do not represent two billable
-  services. Consolidate indexes into one free cluster if both remain active.
-- Keep Supabase Free, Vercel Hobby, and Grafana Cloud Free. Their product limits
-  are capacity limits for this platform, not reasons to enable automatic paid
-  overage.
+- Aiven Kafka, both configured OpenSearch services, and Valkey are confirmed
+  free as of 2026-07-17.
+- Supabase, Vercel, and Grafana are confirmed free as of 2026-07-17.
+- Treat any plan upgrade or automatic overage setting as a budget policy change.
+  Review the projected total before enabling it.
+- Free-plan capacity limits are platform constraints, not reasons to enable
+  automatic paid overage.
 
 ## Artifact cleanup
 
