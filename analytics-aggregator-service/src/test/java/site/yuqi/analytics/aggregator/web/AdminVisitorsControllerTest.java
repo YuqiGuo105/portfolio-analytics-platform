@@ -26,7 +26,7 @@ class AdminVisitorsControllerTest {
     @BeforeEach
     void setUp() {
         service = mock(VisitorQueryService.class);
-        controller = new AdminVisitorsController(service, "yuqi.site", 31, 100);
+        controller = new AdminVisitorsController(service, "yuqi.site", 31, 100, "/admin/");
     }
 
     @Test
@@ -38,7 +38,7 @@ class AdminVisitorsControllerTest {
         controller.visitors(
                 "2026-07-01T00:00:00Z", "2026-07-08T00:00:00Z", null,
                 "Seattle", "page_view", "/blog", "US", "Seattle", "desktop",
-                "Chrome", "google.com", "session-1", 2, 25);
+                "Chrome", "google.com", "session-1", false, 2, 25);
 
         ArgumentCaptor<VisitorQuery> captor = ArgumentCaptor.forClass(VisitorQuery.class);
         verify(service).query(captor.capture());
@@ -46,6 +46,8 @@ class AdminVisitorsControllerTest {
         assertThat(query.siteId()).isEqualTo("yuqi.site");
         assertThat(query.query()).isEqualTo("Seattle");
         assertThat(query.event()).isEqualTo("page_view");
+        assertThat(query.includeAdminTraffic()).isFalse();
+        assertThat(query.excludedPathPrefix()).isEqualTo("/admin");
         assertThat(query.page()).isEqualTo(2);
         assertThat(query.size()).isEqualTo(25);
     }
@@ -54,7 +56,7 @@ class AdminVisitorsControllerTest {
     void rejectsRangeBeyondRawRetentionWindow() {
         assertThatThrownBy(() -> controller.visitors(
                 "2026-01-01T00:00:00Z", "2026-03-15T00:00:00Z", null,
-                null, null, null, null, null, null, null, null, null, 0, 50))
+                null, null, null, null, null, null, null, null, null, false, 0, 50))
                 .isInstanceOf(ResponseStatusException.class)
                 .hasMessageContaining("query range exceeds");
     }
@@ -62,12 +64,12 @@ class AdminVisitorsControllerTest {
     @Test
     void rejectsOversizedPageAndUnboundedText() {
         assertThatThrownBy(() -> controller.visitors(
-                null, null, 24, null, null, null, null, null, null, null, null, null, 0, 101))
+                null, null, 24, null, null, null, null, null, null, null, null, null, false, 0, 101))
                 .isInstanceOf(ResponseStatusException.class);
 
         String oversized = "x".repeat(201);
         assertThatThrownBy(() -> controller.visitors(
-                null, null, 24, oversized, null, null, null, null, null, null, null, null, 0, 50))
+                null, null, 24, oversized, null, null, null, null, null, null, null, null, false, 0, 50))
                 .isInstanceOf(ResponseStatusException.class)
                 .hasMessageContaining("q is too long");
     }

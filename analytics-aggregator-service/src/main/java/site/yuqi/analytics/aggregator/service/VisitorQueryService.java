@@ -83,6 +83,25 @@ public class VisitorQueryService {
         addContains(sql, params, "referrer", "coalesce(r.referrer, '')", query.referrer());
         addExact(sql, params, "sessionId", "r.session_id", query.sessionId());
 
+        if (!query.includeAdminTraffic() && hasText(query.excludedPathPrefix())) {
+            sql.append("""
+                     and lower(coalesce(
+                         nullif(b.page_path, ''),
+                         split_part(split_part(
+                             regexp_replace(coalesce(r.page_url, ''), '^https?://[^/]+', '', 'i'),
+                             '?', 1), '#', 1),
+                         '')) <> :excludedPathRoot
+                     and lower(coalesce(
+                         nullif(b.page_path, ''),
+                         split_part(split_part(
+                             regexp_replace(coalesce(r.page_url, ''), '^https?://[^/]+', '', 'i'),
+                             '?', 1), '#', 1),
+                         '')) not like :excludedPathChildren escape '\\'
+                    """);
+            params.addValue("excludedPathRoot", query.excludedPathPrefix());
+            params.addValue("excludedPathChildren", containsChildrenPattern(query.excludedPathPrefix()));
+        }
+
         if (hasText(query.query())) {
             sql.append("""
                      and lower(concat_ws(' ', r.event_name, r.page_url, r.target_url, r.referrer,
@@ -114,6 +133,14 @@ public class VisitorQueryService {
                 .replace("%", "\\%")
                 .replace("_", "\\_");
         return "%" + escaped + "%";
+    }
+
+    private static String containsChildrenPattern(String pathPrefix) {
+        String escaped = pathPrefix.trim().toLowerCase()
+                .replace("\\", "\\\\")
+                .replace("%", "\\%")
+                .replace("_", "\\_");
+        return escaped + "/%";
     }
 
     private VisitorLogItem mapItem(ResultSet rs, int rowNum) throws SQLException {
@@ -180,6 +207,8 @@ public class VisitorQueryService {
             String browser,
             String referrer,
             String sessionId,
+            boolean includeAdminTraffic,
+            String excludedPathPrefix,
             int page,
             int size) {}
 

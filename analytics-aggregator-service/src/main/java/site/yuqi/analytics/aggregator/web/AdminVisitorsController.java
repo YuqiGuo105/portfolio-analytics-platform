@@ -24,16 +24,19 @@ public class AdminVisitorsController {
     private final String siteId;
     private final int maxRangeDays;
     private final int maxPageSize;
+    private final String excludedPathPrefix;
 
     public AdminVisitorsController(
             VisitorQueryService queryService,
             @Value("${analytics.backfill.site-id:yuqi.site}") String siteId,
             @Value("${analytics.admin.query.max-range-days:31}") int maxRangeDays,
-            @Value("${analytics.admin.query.max-page-size:100}") int maxPageSize) {
+            @Value("${analytics.admin.query.max-page-size:100}") int maxPageSize,
+            @Value("${analytics.admin.query.excluded-path-prefix:/admin}") String excludedPathPrefix) {
         this.queryService = queryService;
         this.siteId = siteId;
         this.maxRangeDays = Math.max(1, maxRangeDays);
         this.maxPageSize = Math.max(1, maxPageSize);
+        this.excludedPathPrefix = normalizePathPrefix(excludedPathPrefix);
     }
 
     @GetMapping("/visitors")
@@ -50,6 +53,7 @@ public class AdminVisitorsController {
             @RequestParam(required = false) String browser,
             @RequestParam(required = false) String referrer,
             @RequestParam(required = false) String sessionId,
+            @RequestParam(defaultValue = "false") boolean includeAdmin,
             @RequestParam(defaultValue = "0") int page,
             @RequestParam(defaultValue = "50") int size) {
         if (page < 0 || page > 10_000) badRequest("page must be between 0 and 10000");
@@ -79,6 +83,8 @@ public class AdminVisitorsController {
                 bounded(browser, 100, "browser"),
                 bounded(referrer, 512, "referrer"),
                 bounded(sessionId, 256, "sessionId"),
+                includeAdmin,
+                excludedPathPrefix,
                 page,
                 size));
     }
@@ -97,6 +103,16 @@ public class AdminVisitorsController {
         String trimmed = value.trim();
         if (trimmed.length() > maxLength) badRequest(name + " is too long");
         return trimmed.isEmpty() ? null : trimmed;
+    }
+
+    private static String normalizePathPrefix(String value) {
+        if (value == null || value.isBlank()) return "/admin";
+        String normalized = value.trim().toLowerCase();
+        if (!normalized.startsWith("/")) normalized = "/" + normalized;
+        while (normalized.length() > 1 && normalized.endsWith("/")) {
+            normalized = normalized.substring(0, normalized.length() - 1);
+        }
+        return normalized;
     }
 
     private static void badRequest(String message) {

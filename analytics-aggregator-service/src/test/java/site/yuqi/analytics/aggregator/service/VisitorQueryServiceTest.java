@@ -66,6 +66,8 @@ class VisitorQueryServiceTest {
                 null,
                 null,
                 null,
+                false,
+                "/admin",
                 0,
                 50));
 
@@ -73,10 +75,54 @@ class VisitorQueryServiceTest {
         ArgumentCaptor<MapSqlParameterSource> params = ArgumentCaptor.forClass(MapSqlParameterSource.class);
         verify(jdbc).query(sql.capture(), params.capture(), any(RowMapper.class));
 
-        assertThat(sql.getValue()).doesNotContain(untrusted).contains(":query", ":path", "limit :limit offset :offset");
+        assertThat(sql.getValue()).doesNotContain(untrusted).contains(
+                ":query", ":path", "nullif(b.page_path, '')", "regexp_replace(coalesce(r.page_url, '')",
+                ":excludedPathRoot",
+                ":excludedPathChildren", "limit :limit offset :offset");
         assertThat(params.getValue().getValue("query")).isEqualTo("%x\\%' or 1=1 --%");
         assertThat(params.getValue().getValue("path")).isEqualTo("%/blog\\_100\\%%");
+        assertThat(params.getValue().getValue("excludedPathRoot")).isEqualTo("/admin");
+        assertThat(params.getValue().getValue("excludedPathChildren")).isEqualTo("/admin/%");
         assertThat(params.getValue().getValue("limit")).isEqualTo(50);
         assertThat(params.getValue().getValue("offset")).isEqualTo(0L);
+    }
+
+    @SuppressWarnings({"unchecked", "rawtypes"})
+    @Test
+    void keepsAdminTrafficWhenItIsExplicitlyIncluded() {
+        NamedParameterJdbcTemplate jdbc = mock(NamedParameterJdbcTemplate.class);
+        when(jdbc.queryForObject(anyString(), any(MapSqlParameterSource.class), eq(Long.class)))
+                .thenReturn(0L);
+        when(jdbc.queryForObject(anyString(), any(MapSqlParameterSource.class), any(RowMapper.class)))
+                .thenReturn(new VisitorSummary(0, 0, 0, 0));
+        when(jdbc.query(anyString(), any(MapSqlParameterSource.class), any(RowMapper.class)))
+                .thenReturn(List.of());
+        VisitorQueryService service = new VisitorQueryService(jdbc, new ObjectMapper());
+
+        service.query(new VisitorQuery(
+                "yuqi.site",
+                Instant.parse("2026-07-01T00:00:00Z"),
+                Instant.parse("2026-07-02T00:00:00Z"),
+                null,
+                null,
+                null,
+                null,
+                null,
+                null,
+                null,
+                null,
+                null,
+                true,
+                "/admin",
+                0,
+                50));
+
+        ArgumentCaptor<String> sql = ArgumentCaptor.forClass(String.class);
+        ArgumentCaptor<MapSqlParameterSource> params = ArgumentCaptor.forClass(MapSqlParameterSource.class);
+        verify(jdbc).query(sql.capture(), params.capture(), any(RowMapper.class));
+
+        assertThat(sql.getValue()).doesNotContain(":excludedPathRoot", ":excludedPathChildren");
+        assertThat(params.getValue().hasValue("excludedPathRoot")).isFalse();
+        assertThat(params.getValue().hasValue("excludedPathChildren")).isFalse();
     }
 }
