@@ -11,6 +11,7 @@ import site.yuqi.analytics.aggregator.service.VisitorQueryService.VisitorSummary
 
 import java.time.Instant;
 import java.util.List;
+import java.util.Map;
 
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.mockito.ArgumentMatchers.any;
@@ -21,6 +22,23 @@ import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
 class VisitorQueryServiceTest {
+
+    @Test
+    void serializesVisitorTimestampsAsIso8601Strings() throws Exception {
+        ObjectMapper mapper = new ObjectMapper().findAndRegisterModules();
+        Instant timestamp = Instant.parse("2026-07-17T16:00:00Z");
+        VisitorQueryService.VisitorLogItem item = new VisitorQueryService.VisitorLogItem(
+                "event-1", "page_view", timestamp, timestamp,
+                "session-1", "anon-1", "/", null, null, "ua", "127.0.0.1",
+                "US", "UT", "Lehi", null, null,
+                "desktop", "Chrome", "macOS", false, Map.of());
+
+        String json = mapper.writeValueAsString(item);
+
+        assertThat(json).contains(
+                "\"eventTime\":\"2026-07-17T16:00:00Z\"",
+                "\"serverTime\":\"2026-07-17T16:00:00Z\"");
+    }
 
     @SuppressWarnings({"unchecked", "rawtypes"})
     @Test

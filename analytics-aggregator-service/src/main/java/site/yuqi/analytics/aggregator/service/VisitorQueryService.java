@@ -1,6 +1,7 @@
 package site.yuqi.analytics.aggregator.service;
 
 import com.fasterxml.jackson.core.type.TypeReference;
+import com.fasterxml.jackson.annotation.JsonFormat;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import lombok.RequiredArgsConstructor;
 import org.springframework.jdbc.core.namedparam.MapSqlParameterSource;
@@ -185,7 +186,9 @@ public class VisitorQueryService {
     public record VisitorLogItem(
             String eventId,
             String eventName,
+            @JsonFormat(shape = JsonFormat.Shape.STRING)
             Instant eventTime,
+            @JsonFormat(shape = JsonFormat.Shape.STRING)
             Instant serverTime,
             String sessionId,
             String anonymousId,
@@ -213,6 +216,8 @@ public class VisitorQueryService {
             List<VisitorLogItem> items,
             VisitorSummary summary,
             PageInfo page,
+            @JsonFormat(shape = JsonFormat.Shape.STRING)
             Instant from,
+            @JsonFormat(shape = JsonFormat.Shape.STRING)
             Instant to) {}
 }
