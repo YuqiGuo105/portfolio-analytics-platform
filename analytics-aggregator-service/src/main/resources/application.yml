@@ -102,6 +102,13 @@ analytics:
     cache:
       enabled: ${PUBLIC_CACHE_ENABLED:true}
       ttl-seconds: ${PUBLIC_CACHE_TTL_SECONDS:30}
+  admin:
+    # Used only by the server-side Portfolio admin proxy. The browser never
+    # receives this token and /api/public remains independently accessible.
+    internal-token: ${ANALYTICS_ADMIN_TOKEN:${INTERNAL_API_TOKEN:}}
+    query:
+      max-range-days: ${ANALYTICS_ADMIN_MAX_RANGE_DAYS:31}
+      max-page-size: ${ANALYTICS_ADMIN_MAX_PAGE_SIZE:100}
   dedup:
     ttl-seconds: ${ANALYTICS_DEDUP_TTL_SECONDS:86400}
     throttle-seconds: ${ANALYTICS_THROTTLE_SECONDS:300}
