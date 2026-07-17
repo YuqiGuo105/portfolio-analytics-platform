@@ -1,0 +1,21 @@
+[
+  {
+    "name": "delete-images-older-than-30-days",
+    "action": {
+      "type": "Delete"
+    },
+    "condition": {
+      "tagState": "any",
+      "olderThan": "2592000s"
+    }
+  },
+  {
+    "name": "keep-five-most-recent-images",
+    "action": {
+      "type": "Keep"
+    },
+    "mostRecentVersions": {
+      "keepCount": 5
+    }
+  }
+]

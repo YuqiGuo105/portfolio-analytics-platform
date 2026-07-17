@@ -87,7 +87,7 @@ jobs:
             --allow-unauthenticated \
             --port=8093 \
             --min-instances=0 \
-            --max-instances=2 \
+            --max-instances=1 \
             --memory=1Gi \
             --cpu=1 \
             --timeout=120 \
