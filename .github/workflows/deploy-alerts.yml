@@ -1,0 +1,98 @@
+name: Deploy analytics-alerts-service
+
+on:
+  workflow_run:
+    workflows: ["ci"]
+    branches: [main]
+    types: [completed]
+
+  workflow_dispatch:
+    inputs:
+      image_tag:
+        description: "Image tag override (optional). Defaults to sha-<short-sha>."
+        required: false
+        type: string
+
+permissions:
+  contents: read
+  id-token: write
+
+env:
+  PROJECT_ID:        portfolio-notify-prod
+  REGION:            us-central1
+  ARTIFACT_REPO:     portfolio
+  IMAGE_NAME:        portfolio-analytics-alerts
+  SERVICE_NAME:      portfolio-analytics-alerts
+  WIF_PROVIDER:      ${{ vars.WIF_PROVIDER }}
+  DEPLOYER_SA_EMAIL: ${{ vars.DEPLOYER_SA_EMAIL }}
+  RUNTIME_SA_EMAIL:  notification-runtime@portfolio-notify-prod.iam.gserviceaccount.com
+
+jobs:
+  deploy:
+    if: >
+      github.event_name != 'workflow_run' ||
+      github.event.workflow_run.conclusion == 'success'
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Compute image tag
+        id: tag
+        run: |
+          if [ -n "${{ github.event.inputs.image_tag }}" ]; then
+            TAG="${{ github.event.inputs.image_tag }}"
+          else
+            TAG="sha-$(echo "${GITHUB_SHA}" | cut -c1-7)"
+          fi
+          echo "tag=${TAG}" >> "$GITHUB_OUTPUT"
+
+      - name: Authenticate to Google Cloud
+        uses: google-github-actions/auth@v2
+        with:
+          workload_identity_provider: ${{ env.WIF_PROVIDER }}
+          service_account: ${{ env.DEPLOYER_SA_EMAIL }}
+
+      - name: Set up gcloud
+        uses: google-github-actions/setup-gcloud@v2
+
+      - name: Configure Docker
+        run: gcloud auth configure-docker ${REGION}-docker.pkg.dev --quiet
+
+      - name: Build and push image
+        run: |
+          IMAGE="${REGION}-docker.pkg.dev/${PROJECT_ID}/${ARTIFACT_REPO}/${IMAGE_NAME}:${{ steps.tag.outputs.tag }}"
+          docker build -f analytics-alerts-service/Dockerfile -t "${IMAGE}" .
+          docker push "${IMAGE}"
+          echo "IMAGE=${IMAGE}" >> "$GITHUB_ENV"
+
+      - name: Deploy to Cloud Run
+        run: |
+          gcloud run deploy "${SERVICE_NAME}" \
+            --image="${IMAGE}" \
+            --region="${REGION}" \
+            --project="${PROJECT_ID}" \
+            --service-account="${RUNTIME_SA_EMAIL}" \
+            --allow-unauthenticated \
+            --port=8094 \
+            --min-instances=0 \
+            --max-instances=1 \
+            --memory=512Mi \
+            --cpu=1 \
+            --cpu-throttling \
+            --timeout=60 \
+            --set-env-vars="^|^SPRING_PROFILES_ACTIVE=prod|ALERTS_EVAL_ENABLED=true|ANALYTICS_ALERT_RETRY_SECONDS=60|ANALYTICS_ALERT_RETRY_BATCH_SIZE=25|NOTIFICATION_SERVICE_BASE_URL=https://portfolio-notification-service-702193211434.us-central1.run.app|ANALYTICS_NOTIFICATION_TIMEOUT_MS=15000" \
+            --update-secrets="SPRING_DATASOURCE_URL=SPRING_DATASOURCE_URL:latest,SPRING_DATASOURCE_USERNAME=SPRING_DATASOURCE_USERNAME:latest,SPRING_DATASOURCE_PASSWORD=SPRING_DATASOURCE_PASSWORD:latest,INTERNAL_API_TOKEN=INTERNAL_API_TOKEN:latest,NOTIFICATION_INTERNAL_TOKEN=NOTIFICATION_INTERNAL_TOKEN:latest"
+
+      - name: Smoke test
+        run: |
+          URL="https://${SERVICE_NAME}-702193211434.us-central1.run.app"
+          for i in $(seq 1 30); do
+            if curl --fail --silent --show-error "${URL}/actuator/health" | grep -q '"status":"UP"'; then
+              exit 0
+            fi
+            sleep 5
+          done
+          exit 1

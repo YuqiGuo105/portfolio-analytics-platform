@@ -170,7 +170,7 @@ flowchart LR
 |---|---|---|
 | `analytics-common` | — | DTOs (`RawEvent`, `EnrichedEvent`, `GeoHint`), topic names, DLQ helper, `Outcome` enum (DONE / DLQ / RETRY) |
 | `analytics-aggregator-service` | 8093 | Single Kafka consumer that owns the full **raw → enrich → rollup** pipeline; also runs the backfill `CommandLineRunner` and exposes `/api/public/visits/*` for the globe |
-| `analytics-alerts-service` | 8094 | CRUD `/api/admin/alert-rules` (gated by `X-Internal-Token`), `@Scheduled` evaluator, HTTP fan-out to `portfolio-notification-service` |
+| `analytics-alerts-service` | 8094 | Protected rule and incident APIs, scheduled rollup evaluation, durable cooldown/dedup, and retried HTTP fan-out to `portfolio-notification-service` |
 
 ### Why only 2 topics
 

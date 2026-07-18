@@ -6,19 +6,22 @@ import org.springframework.beans.factory.annotation.Value;
 import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.scheduling.annotation.Scheduled;
 import org.springframework.stereotype.Service;
+import site.yuqi.analytics.alerts.dto.AlertIncident;
 import site.yuqi.analytics.alerts.dto.AlertRule;
+import site.yuqi.analytics.alerts.repo.AlertIncidentRepository;
 import site.yuqi.analytics.alerts.repo.AlertRuleRepository;
 import site.yuqi.analytics.common.event.Granularity;
 
 import java.sql.Timestamp;
+import java.time.Duration;
 import java.time.Instant;
 import java.util.Map;
 
 /**
  * Evaluates every enabled alert rule once per minute against the
- * {@code geo_time_rollups} table. When a rule trips, we insert an
- * incidents row (UNIQUE dedup_key gives us idempotency under retries)
- * and best-effort POST to portfolio-notification-service.
+ * {@code geo_time_rollups} table. Incidents and delivery attempts are durable,
+ * so a transient notification failure can be retried without opening a second
+ * incident.
  */
 @Service
 @Slf4j
@@ -28,15 +31,23 @@ public class AlertEvaluator {
     private final AlertRuleRepository rules;
     private final JdbcTemplate jdbc;
     private final NotificationSender sender;
+    private final AlertIncidentRepository incidents;
 
     @Value("${analytics.alerts.enabled:true}")
     private boolean evalEnabled;
+
+    @Value("${analytics.alerts.notification-retry-seconds:60}")
+    private long notificationRetrySeconds;
+
+    @Value("${analytics.alerts.notification-retry-batch-size:25}")
+    private int notificationRetryBatchSize;
 
     @Scheduled(cron = "${analytics.alerts.eval-cron:0 * * * * *}")
     public void tick() {
         if (!evalEnabled) {
             return;
         }
+        retryPendingNotifications();
         for (AlertRule r : rules.findEnabled()) {
             try {
                 evaluate(r);
@@ -53,49 +64,53 @@ public class AlertEvaluator {
         if (!fires(count, r.threshold(), r.comparator())) {
             return;
         }
+
+        Instant cooldownStart = Instant.now().minusSeconds(r.cooldownSeconds());
+        if (incidents.existsWithinCooldown(r, cooldownStart)) {
+            return;
+        }
+
         String dedupKey = "%d|%s|%s|%d".formatted(
                 r.ruleId(),
                 r.geoAreaId() == null ? "" : r.geoAreaId(),
                 g.code(),
                 bucket.getEpochSecond());
 
-        int inserted = jdbc.update("""
-                insert into incidents
-                    (rule_id, site_id, geo_area_id, bucket_time, granularity,
-                     measured_value, threshold, comparator, dedup_key)
-                values (?, ?, ?, ?, ?, ?, ?, ?, ?)
-                on conflict (dedup_key) do nothing
-                """,
-                r.ruleId(), r.siteId(), r.geoAreaId(),
-                Timestamp.from(bucket), g.code(),
-                count, r.threshold(), r.comparator(), dedupKey);
+        incidents.insert(r, bucket, count, dedupKey).ifPresent(this::deliver);
+    }
 
-        if (inserted == 0) {
-            // Already fired for this bucket — cooldown handled implicitly by
-            // bucket boundaries (one fire per bucket per rule per area).
-            return;
+    void retryPendingNotifications() {
+        long retrySeconds = Math.max(1, notificationRetrySeconds);
+        int batchSize = Math.max(1, notificationRetryBatchSize);
+        Instant retryBefore = Instant.now().minus(Duration.ofSeconds(retrySeconds));
+        for (AlertIncident incident : incidents.findPendingNotifications(retryBefore, batchSize)) {
+            deliver(incident);
         }
+    }
 
-        String alertBody = "%s %d %s threshold %d (bucket %s)".formatted(
-                r.eventType(), count, r.comparator(), r.threshold(), bucket);
+    private void deliver(AlertIncident incident) {
+        String alertBody = "%s %s threshold %d (measured %d, bucket %s)".formatted(
+                incident.comparator(),
+                incident.ruleName(),
+                incident.threshold(),
+                incident.measuredValue(),
+                incident.bucketTime());
         boolean ok = sender.send(Map.of(
                 "eventType", "FEATURE_RELEASED",
                 "topic", "FEATURE_UPDATES",
-                "title", "Alert: " + r.name(),
+                "title", "Alert: " + incident.ruleName(),
                 "summary", alertBody,
                 "sourceType", "ALERT",
-                "sourceId", String.valueOf(r.ruleId()),
-                "idempotencyKey", dedupKey,
+                "sourceId", String.valueOf(incident.ruleId()),
+                "idempotencyKey", "incident:" + incident.incidentId(),
                 "metadata", Map.of(
-                        "siteId", r.siteId(),
-                        "ruleId", r.ruleId(),
-                        "geoAreaId", r.geoAreaId() == null ? "" : r.geoAreaId(),
-                        "measuredValue", count,
-                        "threshold", r.threshold())));
-
-        if (ok) {
-            jdbc.update("update incidents set notified = true, notified_at = now() where dedup_key = ?", dedupKey);
-        }
+                        "siteId", incident.siteId(),
+                        "ruleId", incident.ruleId(),
+                        "incidentId", incident.incidentId(),
+                        "geoAreaId", incident.geoAreaId() == null ? "" : incident.geoAreaId(),
+                        "measuredValue", incident.measuredValue(),
+                        "threshold", incident.threshold())));
+        incidents.recordNotificationResult(incident.incidentId(), ok);
     }
 
     long countMatching(AlertRule r, Instant bucket) {

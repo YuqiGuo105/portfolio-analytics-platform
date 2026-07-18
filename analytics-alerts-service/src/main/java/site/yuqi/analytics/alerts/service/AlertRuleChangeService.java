@@ -61,7 +61,7 @@ public class AlertRuleChangeService {
 
         PendingChange pending = new PendingChange(
                 changeId, request.action(), request.ruleId(), request.patch(),
-                request.reason(), request.actor(), expectedVersion, expiresAt);
+                request.reason(), request.actor(), expectedVersion, beforeMap, expiresAt);
         pendingChanges.put(changeId, pending);
 
         return new PreparedChange(
@@ -160,13 +160,8 @@ public class AlertRuleChangeService {
     }
 
     private void recordRevision(AlertRule after, PendingChange pending) {
-        AlertRule before = pending.ruleId() != null
-                ? null  // before-state was captured in prepare; store from pending
-                : null;
         try {
-            String beforeJson = pending.ruleId() != null
-                    ? objectMapper.writeValueAsString(repo.findById(pending.ruleId()).orElse(null))
-                    : "{}";
+            String beforeJson = objectMapper.writeValueAsString(pending.beforeState());
             String afterJson = objectMapper.writeValueAsString(after);
             jdbc.update("""
                     INSERT INTO alert_rule_revisions (rule_id, version, action, actor, reason, request_id, before_state, after_state)
@@ -266,5 +261,6 @@ public class AlertRuleChangeService {
 
     private record PendingChange(
             String changeId, String action, Long ruleId, AlertRulePatch patch,
-            String reason, String actor, int expectedVersion, Instant expiresAt) {}
+            String reason, String actor, int expectedVersion,
+            Map<String, Object> beforeState, Instant expiresAt) {}
 }

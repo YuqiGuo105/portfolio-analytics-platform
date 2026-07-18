@@ -3,17 +3,24 @@ package site.yuqi.analytics.alerts.service;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.springframework.jdbc.core.JdbcTemplate;
+import site.yuqi.analytics.alerts.dto.AlertIncident;
 import site.yuqi.analytics.alerts.dto.AlertRule;
+import site.yuqi.analytics.alerts.repo.AlertIncidentRepository;
 import site.yuqi.analytics.alerts.repo.AlertRuleRepository;
+
+import java.time.Instant;
+import java.util.List;
+import java.util.Optional;
 
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.ArgumentMatchers.anyInt;
+import static org.mockito.ArgumentMatchers.anyLong;
 import static org.mockito.ArgumentMatchers.anyMap;
 import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.never;
-import static org.mockito.Mockito.times;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
@@ -22,6 +29,7 @@ class AlertEvaluatorTest {
     private AlertRuleRepository repo;
     private JdbcTemplate jdbc;
     private NotificationSender sender;
+    private AlertIncidentRepository incidents;
     private AlertEvaluator eval;
 
     @BeforeEach
@@ -29,8 +37,10 @@ class AlertEvaluatorTest {
         repo = mock(AlertRuleRepository.class);
         jdbc = mock(JdbcTemplate.class);
         sender = mock(NotificationSender.class);
+        incidents = mock(AlertIncidentRepository.class);
         when(sender.send(anyMap())).thenReturn(true);
-        eval = new AlertEvaluator(repo, jdbc, sender);
+        when(incidents.existsWithinCooldown(any(), any())).thenReturn(false);
+        eval = new AlertEvaluator(repo, jdbc, sender, incidents);
     }
 
     @Test
@@ -40,49 +50,69 @@ class AlertEvaluatorTest {
 
         eval.evaluate(rule);
 
-        verify(jdbc, never()).update(anyString(), any(Object[].class));
+        verify(incidents, never()).insert(any(), any(), anyLong(), anyString());
         verify(sender, never()).send(anyMap());
     }
 
     @Test
     void atOrAboveThresholdInsertsIncidentAndNotifies() {
         AlertRule rule = sampleRule(100, ">=");
+        AlertIncident incident = sampleIncident();
         stubCount(250L);
-        // First update is the incident insert (returns 1 = newly inserted).
-        // Second update is the notified=true mark.
-        when(jdbc.update(anyString(), any(Object[].class))).thenReturn(1, 1);
+        when(incidents.insert(eq(rule), any(), eq(250L), anyString())).thenReturn(Optional.of(incident));
 
         eval.evaluate(rule);
 
-        verify(jdbc, times(2)).update(anyString(), any(Object[].class));
-        verify(sender, times(1)).send(anyMap());
+        verify(sender).send(anyMap());
+        verify(incidents).recordNotificationResult(incident.incidentId(), true);
     }
 
     @Test
     void duplicateIncidentInsertSkipsNotification() {
         AlertRule rule = sampleRule(100, ">=");
         stubCount(250L);
-        // dedup_key collision → insert returns 0.
-        when(jdbc.update(anyString(), any(Object[].class))).thenReturn(0);
+        when(incidents.insert(eq(rule), any(), eq(250L), anyString())).thenReturn(Optional.empty());
 
         eval.evaluate(rule);
 
-        verify(jdbc, times(1)).update(anyString(), any(Object[].class));
         verify(sender, never()).send(anyMap());
     }
 
     @Test
-    void failedNotificationLeavesIncidentRowUnmarked() {
+    void failedNotificationRemainsPendingForRetry() {
         AlertRule rule = sampleRule(100, ">=");
+        AlertIncident incident = sampleIncident();
         stubCount(250L);
-        when(jdbc.update(anyString(), any(Object[].class))).thenReturn(1);
+        when(incidents.insert(eq(rule), any(), eq(250L), anyString())).thenReturn(Optional.of(incident));
         when(sender.send(anyMap())).thenReturn(false);
 
         eval.evaluate(rule);
 
-        // Only the insert ran — no mark-notified update.
-        verify(jdbc, times(1)).update(anyString(), any(Object[].class));
-        verify(sender, times(1)).send(anyMap());
+        verify(sender).send(anyMap());
+        verify(incidents).recordNotificationResult(incident.incidentId(), false);
+    }
+
+    @Test
+    void activeCooldownSuppressesDuplicateIncident() {
+        AlertRule rule = sampleRule(100, ">=");
+        stubCount(250L);
+        when(incidents.existsWithinCooldown(eq(rule), any())).thenReturn(true);
+
+        eval.evaluate(rule);
+
+        verify(incidents, never()).insert(any(), any(), anyLong(), anyString());
+        verify(sender, never()).send(anyMap());
+    }
+
+    @Test
+    void pendingNotificationIsRetriedAndRecorded() {
+        AlertIncident incident = sampleIncident();
+        when(incidents.findPendingNotifications(any(), anyInt())).thenReturn(List.of(incident));
+
+        eval.retryPendingNotifications();
+
+        verify(sender).send(anyMap());
+        verify(incidents).recordNotificationResult(incident.incidentId(), true);
     }
 
     @Test
@@ -97,9 +127,16 @@ class AlertEvaluatorTest {
         when(jdbc.queryForObject(anyString(), eq(Long.class), any(Object[].class))).thenReturn(value);
     }
 
-    private static AlertRule sampleRule(long threshold, String cmp) {
+    private static AlertRule sampleRule(long threshold, String comparator) {
         return new AlertRule(
                 42L, "yuqi.site", "spike", "page_view", "GLOBAL", null,
-                "5m", threshold, cmp, 60, true, 1);
+                "5m", threshold, comparator, 60, true, 1);
+    }
+
+    private static AlertIncident sampleIncident() {
+        Instant now = Instant.now();
+        return new AlertIncident(
+                9L, 42L, "spike", "yuqi.site", null, now, "5m",
+                250L, 100L, ">=", false, null, 0, null, now);
     }
 }
