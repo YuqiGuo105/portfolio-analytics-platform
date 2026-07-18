@@ -64,7 +64,7 @@ class AlertRuleControllerTest {
 
         ResponseEntity<?> prepResp = controller.prepareChange(new PrepareChangeRequest(
                 "SET_ENABLED", rule.ruleId(),
-                new AlertRulePatch(null, null, null, null, null, null, null, null, false),
+                new AlertRulePatch(null, null, null, null, null, null, null, null, false, null),
                 "disable via controller", "test"));
         assertThat(prepResp.getStatusCode().value()).isEqualTo(200);
 
@@ -80,7 +80,7 @@ class AlertRuleControllerTest {
     @Test
     void prepareInvalidActionReturns400() {
         ResponseEntity<?> resp = controller.prepareChange(new PrepareChangeRequest(
-                "INVALID", null, new AlertRulePatch(null, null, null, null, null, null, null, null, null),
+                "INVALID", null, new AlertRulePatch(null, null, null, null, null, null, null, null, null, null),
                 "bad", "test"));
         assertThat(resp.getStatusCode().value()).isEqualTo(400);
     }

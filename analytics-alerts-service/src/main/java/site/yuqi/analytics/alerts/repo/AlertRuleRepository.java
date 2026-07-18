@@ -47,6 +47,10 @@ public class AlertRuleRepository {
     }
 
     public AlertRule insert(AlertRuleRequest r) {
+        return insert(r, true);
+    }
+
+    public AlertRule insert(AlertRuleRequest r, boolean enabled) {
         SimpleJdbcInsert ins = new SimpleJdbcInsert(dataSource)
                 .withTableName("alert_rules")
                 .usingColumns("site_id", "name", "event_type", "geo_level", "geo_area_id",
@@ -62,7 +66,7 @@ public class AlertRuleRepository {
                 Map.entry("threshold", r.threshold()),
                 Map.entry("comparator", r.comparator()),
                 Map.entry("cooldown_seconds", r.cooldownSeconds()),
-                Map.entry("enabled", true)
+                Map.entry("enabled", enabled)
         ));
         return findById(id.longValue()).orElseThrow();
     }
@@ -86,17 +90,30 @@ public class AlertRuleRepository {
      * Optimistic-locking update: only succeeds if current version matches expectedVersion.
      */
     public Optional<AlertRule> updateWithVersion(long id, AlertRuleRequest r, int expectedVersion) {
+        return updateWithVersion(id, r, null, expectedVersion);
+    }
+
+    /**
+     * Optimistic-locking update that can atomically change the rule policy and
+     * its enabled state under the same version check.
+     */
+    public Optional<AlertRule> updateWithVersion(
+            long id,
+            AlertRuleRequest r,
+            Boolean enabled,
+            int expectedVersion) {
         int rows = jdbc.update("""
                 update alert_rules set
                     site_id = ?, name = ?, event_type = ?, geo_level = ?, geo_area_id = ?,
                     granularity = ?, threshold = ?, comparator = ?, cooldown_seconds = ?,
+                    enabled = coalesce(?, enabled),
                     version = version + 1, updated_at = now()
                 where rule_id = ? and version = ?
                 """,
                 r.siteId(), r.name(), r.eventType(), r.geoLevel(),
                 r.geoAreaId() == null ? "" : r.geoAreaId(),
                 r.granularity(), r.threshold(), r.comparator(), r.cooldownSeconds(),
-                id, expectedVersion);
+                enabled, id, expectedVersion);
         if (rows == 0) return Optional.empty();
         return findById(id);
     }

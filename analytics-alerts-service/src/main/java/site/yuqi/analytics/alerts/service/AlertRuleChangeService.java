@@ -42,6 +42,7 @@ public class AlertRuleChangeService {
     public PreparedChange prepare(PrepareChangeRequest request) {
         evictExpired();
         validateAction(request.action());
+        validatePatch(request.action(), request.patch());
 
         AlertRule before = null;
         int expectedVersion = 0;
@@ -119,7 +120,7 @@ public class AlertRuleChangeService {
     private AlertRule applyCreate(PendingChange pending) {
         AlertRulePatch p = pending.patch();
         AlertRuleRequest req = new AlertRuleRequest(
-                "default",
+                Objects.requireNonNull(p.siteId(), "siteId required for CREATE"),
                 Objects.requireNonNull(p.name(), "name required for CREATE"),
                 Objects.requireNonNull(p.eventType(), "eventType required for CREATE"),
                 p.geoLevel() != null ? p.geoLevel() : "GLOBAL",
@@ -128,7 +129,7 @@ public class AlertRuleChangeService {
                 p.threshold() != null ? p.threshold() : 0L,
                 p.comparator() != null ? p.comparator() : ">=",
                 p.cooldownSeconds() != null ? p.cooldownSeconds() : 1800);
-        return repo.insert(req);
+        return repo.insert(req, p.enabled() == null || p.enabled());
     }
 
     private AlertRule applyUpdate(PendingChange pending) {
@@ -136,7 +137,7 @@ public class AlertRuleChangeService {
                 .orElseThrow(() -> new IllegalArgumentException("Rule not found: " + pending.ruleId()));
         AlertRulePatch p = pending.patch();
         AlertRuleRequest merged = new AlertRuleRequest(
-                current.siteId(),
+                p.siteId() != null ? p.siteId() : current.siteId(),
                 p.name() != null ? p.name() : current.name(),
                 p.eventType() != null ? p.eventType() : current.eventType(),
                 p.geoLevel() != null ? p.geoLevel() : current.geoLevel(),
@@ -145,7 +146,8 @@ public class AlertRuleChangeService {
                 p.threshold() != null ? p.threshold() : current.threshold(),
                 p.comparator() != null ? p.comparator() : current.comparator(),
                 p.cooldownSeconds() != null ? p.cooldownSeconds() : current.cooldownSeconds());
-        return repo.updateWithVersion(pending.ruleId(), merged, pending.expectedVersion())
+        return repo.updateWithVersion(
+                        pending.ruleId(), merged, p.enabled(), pending.expectedVersion())
                 .orElseThrow(() -> new IllegalStateException(
                         "Version conflict: rule " + pending.ruleId() + " was modified since prepare"));
     }
@@ -186,6 +188,7 @@ public class AlertRuleChangeService {
         Map<String, Object> after = new LinkedHashMap<>();
         switch (action) {
             case "CREATE" -> {
+                after.put("siteId", patch.siteId());
                 after.put("name", patch.name());
                 after.put("eventType", patch.eventType());
                 after.put("geoLevel", patch.geoLevel() != null ? patch.geoLevel() : "GLOBAL");
@@ -193,10 +196,11 @@ public class AlertRuleChangeService {
                 after.put("threshold", patch.threshold() != null ? patch.threshold() : 0);
                 after.put("comparator", patch.comparator() != null ? patch.comparator() : ">=");
                 after.put("cooldownSeconds", patch.cooldownSeconds() != null ? patch.cooldownSeconds() : 1800);
-                after.put("enabled", true);
+                after.put("enabled", patch.enabled() == null || patch.enabled());
             }
             case "UPDATE" -> {
                 if (before != null) after.putAll(ruleToMap(before));
+                if (patch.siteId() != null) after.put("siteId", patch.siteId());
                 if (patch.name() != null) after.put("name", patch.name());
                 if (patch.eventType() != null) after.put("eventType", patch.eventType());
                 if (patch.geoLevel() != null) after.put("geoLevel", patch.geoLevel());
@@ -205,6 +209,7 @@ public class AlertRuleChangeService {
                 if (patch.threshold() != null) after.put("threshold", patch.threshold());
                 if (patch.comparator() != null) after.put("comparator", patch.comparator());
                 if (patch.cooldownSeconds() != null) after.put("cooldownSeconds", patch.cooldownSeconds());
+                if (patch.enabled() != null) after.put("enabled", patch.enabled());
             }
             case "SET_ENABLED" -> {
                 if (before != null) after.putAll(ruleToMap(before));
@@ -227,7 +232,7 @@ public class AlertRuleChangeService {
 
     private List<String> computeWarnings(String action, AlertRule before, AlertRulePatch patch) {
         List<String> warnings = new ArrayList<>();
-        if ("SET_ENABLED".equals(action) && before != null && patch != null
+        if (("SET_ENABLED".equals(action) || "UPDATE".equals(action)) && before != null && patch != null
                 && Boolean.FALSE.equals(patch.enabled()) && before.enabled()) {
             warnings.add("This will disable the rule. No alerts will fire until re-enabled.");
         }
@@ -235,6 +240,48 @@ public class AlertRuleChangeService {
             warnings.add("Threshold is 0 — this rule will always fire.");
         }
         return warnings;
+    }
+
+    private void validatePatch(String action, AlertRulePatch patch) {
+        if (patch == null) {
+            throw new IllegalArgumentException("patch is required");
+        }
+        if ("CREATE".equals(action)) {
+            requireText(patch.siteId(), "siteId");
+            requireText(patch.name(), "name");
+            requireText(patch.eventType(), "eventType");
+        } else {
+            validateOptionalText(patch.siteId(), "siteId");
+            validateOptionalText(patch.name(), "name");
+            validateOptionalText(patch.eventType(), "eventType");
+        }
+        if (patch.geoLevel() != null && !Set.of("GLOBAL", "COUNTRY", "REGION", "METRO").contains(patch.geoLevel())) {
+            throw new IllegalArgumentException("geoLevel must be GLOBAL, COUNTRY, REGION, or METRO");
+        }
+        if (patch.granularity() != null && !Set.of("5m", "1d").contains(patch.granularity())) {
+            throw new IllegalArgumentException("granularity must be 5m or 1d");
+        }
+        if (patch.comparator() != null && !Set.of(">=", "<=").contains(patch.comparator())) {
+            throw new IllegalArgumentException("comparator must be >= or <=");
+        }
+        if (patch.threshold() != null && patch.threshold() < 0) {
+            throw new IllegalArgumentException("threshold must be at least 0");
+        }
+        if (patch.cooldownSeconds() != null && patch.cooldownSeconds() < 60) {
+            throw new IllegalArgumentException("cooldownSeconds must be at least 60");
+        }
+    }
+
+    private void requireText(String value, String field) {
+        if (value == null || value.isBlank()) {
+            throw new IllegalArgumentException(field + " is required");
+        }
+    }
+
+    private void validateOptionalText(String value, String field) {
+        if (value != null && value.isBlank()) {
+            throw new IllegalArgumentException(field + " cannot be blank");
+        }
     }
 
     @SuppressWarnings("unchecked")

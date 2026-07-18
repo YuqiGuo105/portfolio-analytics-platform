@@ -36,7 +36,7 @@ class AlertRuleChangeServiceTest {
     void prepareCreateReturnsChangeIdAndDiff() {
         PrepareChangeRequest req = new PrepareChangeRequest(
                 "CREATE", null,
-                new AlertRulePatch("spike-test", "page_view", "GLOBAL", null, "5m", 100L, ">=", 1800, null),
+                new AlertRulePatch("spike-test", "page_view", "GLOBAL", null, "5m", 100L, ">=", 1800, null, "yuqi.site"),
                 "unit test", "test-actor");
 
         PreparedChange result = service.prepare(req);
@@ -53,7 +53,7 @@ class AlertRuleChangeServiceTest {
     void applyCreateInsertsRuleAndReturnsSuccess() {
         PrepareChangeRequest req = new PrepareChangeRequest(
                 "CREATE", null,
-                new AlertRulePatch("new-rule", "click", "COUNTRY", "US", "1d", 50L, ">=", 600, null),
+                new AlertRulePatch("new-rule", "click", "COUNTRY", "US", "1d", 50L, ">=", 600, false, "yuqi.site"),
                 "test create", "admin@test");
 
         PreparedChange prepared = service.prepare(req);
@@ -65,8 +65,10 @@ class AlertRuleChangeServiceTest {
 
         AlertRule created = repo.findAll().get(0);
         assertThat(created.name()).isEqualTo("new-rule");
+        assertThat(created.siteId()).isEqualTo("yuqi.site");
         assertThat(created.eventType()).isEqualTo("click");
         assertThat(created.threshold()).isEqualTo(50);
+        assertThat(created.enabled()).isFalse();
     }
 
     @Test
@@ -76,7 +78,7 @@ class AlertRuleChangeServiceTest {
 
         PrepareChangeRequest req = new PrepareChangeRequest(
                 "UPDATE", existing.ruleId(),
-                new AlertRulePatch(null, null, null, null, null, 200L, null, null, null),
+                new AlertRulePatch(null, null, null, null, null, 200L, null, null, null, null),
                 "raise threshold", "admin");
 
         PreparedChange result = service.prepare(req);
@@ -93,7 +95,7 @@ class AlertRuleChangeServiceTest {
 
         PreparedChange prepared = service.prepare(new PrepareChangeRequest(
                 "UPDATE", existing.ruleId(),
-                new AlertRulePatch("renamed", null, null, null, null, 500L, null, null, null),
+                new AlertRulePatch("renamed", null, null, null, null, 500L, null, null, null, null),
                 "rename + threshold", "admin"));
 
         Map<String, Object> result = service.apply(new ApplyChangeRequest(prepared.changeId(), "idem-2"));
@@ -106,13 +108,49 @@ class AlertRuleChangeServiceTest {
     }
 
     @Test
+    void applyUpdateChangesPolicyAndEnabledStateAtomically() {
+        AlertRule existing = repo.insert(new AlertRuleRequest(
+                "yuqi.site", "active", "page_view", "GLOBAL", null, "5m", 100, ">=", 1800));
+
+        PreparedChange prepared = service.prepare(new PrepareChangeRequest(
+                "UPDATE", existing.ruleId(),
+                new AlertRulePatch("quiet-hours", null, null, null, "1d", 250L, null, 3600, false, null),
+                "adjust policy", "admin"));
+
+        assertThat(prepared.diff()).containsKeys("name", "granularity", "threshold", "cooldownSeconds", "enabled");
+        assertThat(prepared.warnings()).anyMatch(warning -> warning.contains("disable"));
+
+        service.apply(new ApplyChangeRequest(prepared.changeId(), "idem-policy-state"));
+
+        AlertRule updated = repo.findById(existing.ruleId()).orElseThrow();
+        assertThat(updated.name()).isEqualTo("quiet-hours");
+        assertThat(updated.granularity()).isEqualTo("1d");
+        assertThat(updated.threshold()).isEqualTo(250);
+        assertThat(updated.cooldownSeconds()).isEqualTo(3600);
+        assertThat(updated.enabled()).isFalse();
+        assertThat(updated.version()).isEqualTo(2);
+    }
+
+    @Test
+    void prepareRejectsInvalidPolicyPatch() {
+        AlertRule existing = repo.insert(new AlertRuleRequest(
+                "yuqi.site", "valid", "page_view", "GLOBAL", null, "5m", 100, ">=", 1800));
+
+        assertThatThrownBy(() -> service.prepare(new PrepareChangeRequest(
+                "UPDATE", existing.ruleId(),
+                new AlertRulePatch(null, null, null, null, "hourly", -1L, "=", 10, null, null),
+                "invalid", "admin")))
+                .isInstanceOf(IllegalArgumentException.class);
+    }
+
+    @Test
     void prepareSetEnabledProducesWarning() {
         AlertRule existing = repo.insert(new AlertRuleRequest(
                 "yuqi.site", "active-rule", "page_view", "GLOBAL", null, "5m", 100, ">=", 1800));
 
         PreparedChange result = service.prepare(new PrepareChangeRequest(
                 "SET_ENABLED", existing.ruleId(),
-                new AlertRulePatch(null, null, null, null, null, null, null, null, false),
+                new AlertRulePatch(null, null, null, null, null, null, null, null, false, null),
                 "disable noisy rule", "admin"));
 
         assertThat(result.warnings()).isNotEmpty();
@@ -126,7 +164,7 @@ class AlertRuleChangeServiceTest {
 
         PreparedChange prepared = service.prepare(new PrepareChangeRequest(
                 "SET_ENABLED", existing.ruleId(),
-                new AlertRulePatch(null, null, null, null, null, null, null, null, false),
+                new AlertRulePatch(null, null, null, null, null, null, null, null, false, null),
                 "disable", "admin"));
 
         service.apply(new ApplyChangeRequest(prepared.changeId(), "idem-3"));
@@ -141,7 +179,7 @@ class AlertRuleChangeServiceTest {
         // Prepare then manually expire by waiting (we can't wait 5min, so test the error path)
         PrepareChangeRequest req = new PrepareChangeRequest(
                 "CREATE", null,
-                new AlertRulePatch("expired", "page_view", "GLOBAL", null, "5m", 1L, ">=", 60, null),
+                new AlertRulePatch("expired", "page_view", "GLOBAL", null, "5m", 1L, ">=", 60, null, "yuqi.site"),
                 "will expire", "admin");
         service.prepare(req);
 
@@ -158,7 +196,7 @@ class AlertRuleChangeServiceTest {
 
         PreparedChange prepared = service.prepare(new PrepareChangeRequest(
                 "SET_ENABLED", existing.ruleId(),
-                new AlertRulePatch(null, null, null, null, null, null, null, null, false),
+                new AlertRulePatch(null, null, null, null, null, null, null, null, false, null),
                 "test idempotency", "admin"));
 
         Map<String, Object> first = service.apply(new ApplyChangeRequest(prepared.changeId(), "same-key"));
@@ -170,7 +208,7 @@ class AlertRuleChangeServiceTest {
     @Test
     void invalidActionThrows() {
         assertThatThrownBy(() -> service.prepare(new PrepareChangeRequest(
-                "DELETE", null, new AlertRulePatch(null, null, null, null, null, null, null, null, null),
+                "DELETE", null, new AlertRulePatch(null, null, null, null, null, null, null, null, null, null),
                 "bad", "admin")))
                 .isInstanceOf(IllegalArgumentException.class)
                 .hasMessageContaining("Invalid action");
@@ -180,7 +218,7 @@ class AlertRuleChangeServiceTest {
     void prepareUpdateOnNonexistentRuleThrows() {
         assertThatThrownBy(() -> service.prepare(new PrepareChangeRequest(
                 "UPDATE", 9999L,
-                new AlertRulePatch("x", null, null, null, null, null, null, null, null),
+                new AlertRulePatch("x", null, null, null, null, null, null, null, null, null),
                 "missing", "admin")))
                 .isInstanceOf(IllegalArgumentException.class)
                 .hasMessageContaining("not found");

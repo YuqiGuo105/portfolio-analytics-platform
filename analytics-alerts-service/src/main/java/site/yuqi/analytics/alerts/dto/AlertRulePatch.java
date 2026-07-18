@@ -15,5 +15,6 @@ public record AlertRulePatch(
         Long threshold,
         String comparator,
         Integer cooldownSeconds,
-        Boolean enabled
+        Boolean enabled,
+        String siteId
 ) {}
