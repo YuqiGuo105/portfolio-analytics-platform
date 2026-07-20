@@ -4,11 +4,9 @@ import org.apache.kafka.clients.consumer.ConsumerRecord;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.springframework.kafka.support.Acknowledgment;
-import site.yuqi.analytics.aggregator.enrich.DedupService;
 import site.yuqi.analytics.aggregator.enrich.EnrichmentPipeline;
+import site.yuqi.analytics.aggregator.service.KafkaEventBatchProcessor;
 import site.yuqi.analytics.aggregator.service.RollupUpsertService;
-import site.yuqi.analytics.aggregator.service.SessionAggregatorService;
-import site.yuqi.analytics.aggregator.service.VisitorLogPersistService;
 import site.yuqi.analytics.common.event.EnrichedEvent;
 import site.yuqi.analytics.common.event.EnrichedGeo;
 import site.yuqi.analytics.common.event.GeoHint;
@@ -17,21 +15,18 @@ import site.yuqi.analytics.common.event.RawEvent;
 import site.yuqi.analytics.common.kafka.DlqProducer;
 import site.yuqi.analytics.common.kafka.Outcome;
 
-import org.mockito.InOrder;
-
 import java.time.Instant;
 import java.util.List;
 
 import static org.assertj.core.api.Assertions.assertThat;
+import static org.assertj.core.api.Assertions.assertThatThrownBy;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyList;
 import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.doAnswer;
 import static org.mockito.Mockito.doNothing;
-import static org.mockito.Mockito.doReturn;
 import static org.mockito.Mockito.doThrow;
-import static org.mockito.Mockito.inOrder;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.times;
@@ -47,23 +42,17 @@ class RawEventConsumerTest {
 
     private EnrichmentPipeline pipeline;
     private RollupUpsertService rollup;
-    private SessionAggregatorService sessions;
-    private VisitorLogPersistService visitorLogs;
+    private KafkaEventBatchProcessor batchProcessor;
     private DlqProducer dlq;
-    private DedupService dedupService;
     private RawEventConsumer consumer;
 
     @BeforeEach
     void setUp() {
         pipeline = mock(EnrichmentPipeline.class);
         rollup = mock(RollupUpsertService.class);
-        sessions = mock(SessionAggregatorService.class);
-        visitorLogs = mock(VisitorLogPersistService.class);
+        batchProcessor = mock(KafkaEventBatchProcessor.class);
         dlq = mock(DlqProducer.class);
-        dedupService = mock(DedupService.class);
-        // Default: all visits are new (throttle passes through)
-        doReturn(true).when(dedupService).throttleVisit(any(EnrichedEvent.class));
-        consumer = new RawEventConsumer(pipeline, rollup, sessions, visitorLogs, dlq, dedupService);
+        consumer = new RawEventConsumer(pipeline, batchProcessor, rollup, dlq);
     }
 
     @Test
@@ -173,22 +162,14 @@ class RawEventConsumerTest {
             pr.eventId = enriched.eventId();
             pr.rawEvent = raw;
             return enriched;
-        }).when(pipeline).parseAndEnrich(anyString(), any(EnrichmentPipeline.ParseResult.class));
-        doNothing().when(visitorLogs).persistBatch(anyList(), anyList());
-        doNothing().when(rollup).upsertBatch(anyList());
+        }).when(pipeline).parseAndEnrichWithoutDedup(anyString(), any(EnrichmentPipeline.ParseResult.class));
 
         Acknowledgment ack = mock(Acknowledgment.class);
         consumer.onMessage(List.of(record("k1", "{\"x\":1}", 0L)), ack);
 
-        // Persist must happen before rollup so that a rollup failure leaves
-        // visitor_logs already written (idempotent via ON CONFLICT); a
-        // persist failure leaves rollup untouched.
-        InOrder inOrder = inOrder(visitorLogs, sessions, rollup, ack);
-        inOrder.verify(visitorLogs).persistBatch(anyList(), anyList());
-        inOrder.verify(sessions).processBatch(anyList());
-        inOrder.verify(rollup).upsertBatch(anyList());
-        inOrder.verify(ack).acknowledge();
-        verify(dlq, never()).publish(any(), any(), any());
+        verify(batchProcessor).process(anyList());
+        verify(ack).acknowledge();
+        verify(dlq, never()).publishOrThrow(any(), any(), any());
     }
 
     @Test
@@ -200,18 +181,16 @@ class RawEventConsumerTest {
             pr.eventId = enriched.eventId();
             pr.rawEvent = raw;
             return enriched;
-        }).when(pipeline).parseAndEnrich(anyString(), any(EnrichmentPipeline.ParseResult.class));
-        doThrow(new RuntimeException("visitor_logs write failed"))
-                .when(visitorLogs).persistBatch(anyList(), anyList());
+        }).when(pipeline).parseAndEnrichWithoutDedup(anyString(), any(EnrichmentPipeline.ParseResult.class));
+        doThrow(new RuntimeException("database unavailable"))
+                .when(batchProcessor).process(anyList());
 
         Acknowledgment ack = mock(Acknowledgment.class);
-        consumer.onMessage(List.of(record("k", "{}", 1L)), ack);
+        assertThatThrownBy(() -> consumer.onMessage(List.of(record("k", "{}", 1L)), ack))
+                .isInstanceOf(RuntimeException.class);
 
-        verify(visitorLogs, times(1)).persistBatch(anyList(), anyList());
-        verify(sessions,    never()).processBatch(anyList());
-        verify(rollup,      never()).upsertBatch(anyList());
         verify(ack,         never()).acknowledge();
-        verify(dlq,         never()).publish(any(), any(), any());
+        verify(dlq,         never()).publishOrThrow(any(), any(), any());
     }
 
     @Test
@@ -228,7 +207,7 @@ class RawEventConsumerTest {
             pr.eventId = good.eventId();
             pr.rawEvent = goodRaw;
             return good;
-        }).when(pipeline).parseAndEnrich(anyString(), any(EnrichmentPipeline.ParseResult.class));
+        }).when(pipeline).parseAndEnrichWithoutDedup(anyString(), any(EnrichmentPipeline.ParseResult.class));
 
         Acknowledgment ack = mock(Acknowledgment.class);
         consumer.onMessage(List.of(
@@ -236,10 +215,8 @@ class RawEventConsumerTest {
                 record("kbad",  "bad", 11L)
         ), ack);
 
-        verify(dlq,         times(1)).publish(eq("kbad"), eq("bad"), anyString());
-        verify(visitorLogs, times(1)).persistBatch(anyList(), anyList());
-        verify(sessions,    times(1)).processBatch(anyList());
-        verify(rollup,      times(1)).upsertBatch(anyList());  // good record still processed
+        verify(dlq,         times(1)).publishOrThrow(eq("kbad"), eq("bad"), anyString());
+        verify(batchProcessor, times(1)).process(anyList());
         verify(ack,         times(1)).acknowledge();
     }
 
@@ -252,38 +229,37 @@ class RawEventConsumerTest {
             pr.eventId = enriched.eventId();
             pr.rawEvent = raw;
             return enriched;
-        }).when(pipeline).parseAndEnrich(anyString(), any(EnrichmentPipeline.ParseResult.class));
-        doNothing().when(visitorLogs).persistBatch(anyList(), anyList());
-        doThrow(new RuntimeException("db gone")).when(rollup).upsertBatch(anyList());
+        }).when(pipeline).parseAndEnrichWithoutDedup(anyString(), any(EnrichmentPipeline.ParseResult.class));
+        doThrow(new RuntimeException("db gone")).when(batchProcessor).process(anyList());
 
         Acknowledgment ack = mock(Acknowledgment.class);
-        consumer.onMessage(List.of(record("k", "{}", 1L)), ack);
+        assertThatThrownBy(() -> consumer.onMessage(List.of(record("k", "{}", 1L)), ack))
+                .isInstanceOf(RuntimeException.class);
 
         verify(ack, never()).acknowledge();
-        verify(dedupService).release(enriched.eventId());
-        verify(dedupService).releaseThrottle(enriched);
-        verify(dlq, never()).publish(any(), any(), any());
+        verify(dlq, never()).publishOrThrow(any(), any(), any());
     }
 
     @Test
     void batchAllDuplicatesAcksAndSkipsUpsert() {
+        EnrichedEvent enriched = sampleEnriched();
+        RawEvent raw = sampleRaw(enriched.eventId());
         doAnswer(inv -> {
             EnrichmentPipeline.ParseResult pr = inv.getArgument(1);
-            pr.duplicate = true;
-            return null;
-        }).when(pipeline).parseAndEnrich(anyString(), any(EnrichmentPipeline.ParseResult.class));
+            pr.rawEvent = raw;
+            return enriched;
+        }).when(pipeline).parseAndEnrichWithoutDedup(anyString(), any(EnrichmentPipeline.ParseResult.class));
 
         Acknowledgment ack = mock(Acknowledgment.class);
         consumer.onMessage(List.of(record("k", "{}", 1L)), ack);
 
-        verify(rollup, never()).upsertBatch(anyList());
+        verify(batchProcessor).process(anyList());
         verify(ack,    times(1)).acknowledge();
-        verify(dlq,    never()).publish(any(), any(), any());
+        verify(dlq,    never()).publishOrThrow(any(), any(), any());
     }
 
     @Test
-    void throttledRefreshSkipsVisitorLogsAndRollup() {
-        // 5分钟内刷新同一页面 → throttle 返回 false → visitor_logs 和 rollup 都不写入
+    void durableProcessorOwnsThrottleDecisionAndConsumerStillAcks() {
         EnrichedEvent enriched = sampleEnriched();
         RawEvent raw = sampleRaw(enriched.eventId());
         doAnswer(inv -> {
@@ -291,18 +267,12 @@ class RawEventConsumerTest {
             pr.eventId = enriched.eventId();
             pr.rawEvent = raw;
             return enriched;
-        }).when(pipeline).parseAndEnrich(anyString(), any(EnrichmentPipeline.ParseResult.class));
-
-        // Simulate throttled refresh
-        doReturn(false).when(dedupService).throttleVisit(any(EnrichedEvent.class));
+        }).when(pipeline).parseAndEnrichWithoutDedup(anyString(), any(EnrichmentPipeline.ParseResult.class));
 
         Acknowledgment ack = mock(Acknowledgment.class);
         consumer.onMessage(List.of(record("k", "{}", 5L)), ack);
 
-        // Neither visitor_logs NOR rollup should be written
-        verify(visitorLogs, never()).persistBatch(anyList());
-        verify(rollup,      never()).upsertBatch(anyList());
-        // But the batch is still acked (throttled events are intentionally dropped)
+        verify(batchProcessor).process(anyList());
         verify(ack, times(1)).acknowledge();
     }
 

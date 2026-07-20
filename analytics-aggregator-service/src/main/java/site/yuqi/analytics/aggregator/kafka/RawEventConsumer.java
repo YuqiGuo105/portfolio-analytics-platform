@@ -6,11 +6,9 @@ import org.apache.kafka.clients.consumer.ConsumerRecord;
 import org.springframework.kafka.annotation.KafkaListener;
 import org.springframework.kafka.support.Acknowledgment;
 import org.springframework.stereotype.Component;
-import site.yuqi.analytics.aggregator.enrich.DedupService;
 import site.yuqi.analytics.aggregator.enrich.EnrichmentPipeline;
+import site.yuqi.analytics.aggregator.service.KafkaEventBatchProcessor;
 import site.yuqi.analytics.aggregator.service.RollupUpsertService;
-import site.yuqi.analytics.aggregator.service.SessionAggregatorService;
-import site.yuqi.analytics.aggregator.service.VisitorLogPersistService;
 import site.yuqi.analytics.common.event.EnrichedEvent;
 import site.yuqi.analytics.common.event.RawEvent;
 import site.yuqi.analytics.common.kafka.DlqProducer;
@@ -29,11 +27,10 @@ import java.util.List;
  *       Dedup hits and empty payloads are silently dropped. Both the
  *       {@link EnrichedEvent} <b>and</b> parsed {@link RawEvent} are collected
  *       for separate private-raw and canonical-fact writes.</li>
- *   <li>Persist exact raw, sanitized fact, and legacy compatibility rows in one
- *       idempotent transaction via {@link VisitorLogPersistService}.</li>
- *   <li>Rebuild affected session projections and configured funnel steps.</li>
- *   <li>Upsert additive geo rollups last, then acknowledge. On persistence
- *       failure Redis processing/throttle claims are released for Kafka replay.</li>
+ *   <li>Claim each event in the durable Postgres inbox and update all database
+ *       projections in one transaction.</li>
+ *   <li>Acknowledge only after that transaction commits. Transient failures are
+ *       thrown to the container error handler, which seeks and retries.</li>
  * </ol>
  *
  * <p>The previous single-record listener is preserved as {@link #process}
@@ -45,11 +42,9 @@ import java.util.List;
 public class RawEventConsumer {
 
     private final EnrichmentPipeline pipeline;
+    private final KafkaEventBatchProcessor batchProcessor;
     private final RollupUpsertService rollup;
-    private final SessionAggregatorService sessions;
-    private final VisitorLogPersistService visitorLogs;
     private final DlqProducer dlq;
-    private final DedupService dedupService;
 
     @KafkaListener(
             topics = "${analytics.topics.raw}",
@@ -62,70 +57,47 @@ public class RawEventConsumer {
             return;
         }
 
-        List<EnrichedEvent> enriched = new ArrayList<>(records.size());
-        // Parallel list of raw events for the access-restricted raw tier.
-        // Order does not need to match `enriched` — the two tables are
-        // independent — but both lists are populated from the same
-        // successful-parse iterations so they stay in lockstep in practice.
-        List<RawEvent> rawEvents = new ArrayList<>(records.size());
+        List<RawEventEnvelope> candidates = new ArrayList<>(records.size());
 
         for (ConsumerRecord<String, String> rec : records) {
             EnrichmentPipeline.ParseResult pr = new EnrichmentPipeline.ParseResult();
             EnrichedEvent ev;
             try {
-                ev = pipeline.parseAndEnrich(rec.value(), pr);
+                ev = pipeline.parseAndEnrichWithoutDedup(rec.value(), pr);
             } catch (RuntimeException unexpected) {
                 log.error("{\"event\":\"pipeline_threw\",\"offset\":{},\"err\":\"{}\"}",
                         rec.offset(), unexpected.getMessage());
-                // Leave entire batch un-acked so it is re-delivered and retried.
-                return;
+                throw unexpected;
             }
 
             if (ev == null) {
                 if (!pr.duplicate && pr.parseError != null) {
                     // Malformed record: send to DLQ so the batch can proceed.
-                    dlq.publish(rec.key(),
+                    dlq.publishOrThrow(rec.key(),
                             rec.value() == null ? "" : rec.value(),
                             "%s at %s-%d@%d".formatted(
                                     pr.parseError, rec.topic(), rec.partition(), rec.offset()));
                 }
-                // Dedup hit or empty payload — just skip, already handled.
+                // Malformed records are durable in the DLQ before source ack.
                 continue;
             }
-            // Visit throttle: same session+page within 5 min counts as 1.
-            // Checked here (before visitor_logs write) so the dashboard TODAY
-            // count doesn't increment on rapid page refreshes.
-            if ("page_view".equals(ev.eventType()) && !dedupService.throttleVisit(ev)) {
-                log.debug("{\"event\":\"visit_throttled\",\"page\":\"{}\"}", ev.pageUrl());
-                continue;
-            }
-            enriched.add(ev);
-            if (pr.rawEvent != null) rawEvents.add(pr.rawEvent);
+            candidates.add(new RawEventEnvelope(
+                    rec.topic(), rec.partition(), rec.offset(), pr.rawEvent, ev));
         }
 
-        if (enriched.isEmpty()) {
+        if (candidates.isEmpty()) {
             ack.acknowledge();
             return;
         }
 
         try {
-            // Idempotent facts first, then idempotent session projections.
-            // Additive rollups run last so no fallible side effect follows them.
-            visitorLogs.persistBatch(rawEvents, enriched);
-            sessions.processBatch(enriched);
-            rollup.upsertBatch(enriched);
+            batchProcessor.process(candidates);
         } catch (RuntimeException dbErr) {
             log.warn("{\"event\":\"batch_persist_failed\",\"batchSize\":{},\"err\":\"{}\"}",
-                    enriched.size(), dbErr.getMessage());
-            enriched.forEach(event -> {
-                dedupService.release(event.eventId());
-                dedupService.releaseThrottle(event);
-            });
-            // Do NOT ack — let Kafka re-deliver the whole batch.
-            return;
+                    candidates.size(), dbErr.getMessage());
+            throw dbErr;
         }
-        // Keep acknowledgement outside the persistence catch. If the broker
-        // rejects the ack, the retained dedup claims make replay a no-op.
+        // A replay after an ack/commit race is absorbed by analytics_kafka_inbox.
         ack.acknowledge();
     }
 

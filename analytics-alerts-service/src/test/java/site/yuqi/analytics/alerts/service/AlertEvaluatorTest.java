@@ -2,6 +2,7 @@ package site.yuqi.analytics.alerts.service;
 
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
+import org.mockito.ArgumentCaptor;
 import org.springframework.jdbc.core.JdbcTemplate;
 import site.yuqi.analytics.alerts.dto.AlertIncident;
 import site.yuqi.analytics.alerts.dto.AlertRule;
@@ -63,7 +64,11 @@ class AlertEvaluatorTest {
 
         eval.evaluate(rule);
 
-        verify(sender).send(anyMap());
+        ArgumentCaptor<java.util.Map<String, Object>> payload = ArgumentCaptor.forClass(java.util.Map.class);
+        verify(sender).send(payload.capture());
+        assertThat(payload.getValue())
+                .containsEntry("eventType", "ANALYTICS_ALERT_TRIGGERED")
+                .containsEntry("topic", "ADMIN_ALERTS");
         verify(incidents).recordNotificationResult(incident.incidentId(), true);
     }
 

@@ -40,6 +40,19 @@ public class EnrichmentPipeline {
      *         acked.
      */
     public EnrichedEvent parseAndEnrich(String value, ParseResult outResult) {
+        return parseAndEnrich(value, outResult, true);
+    }
+
+    /**
+     * Kafka correctness path. Durable idempotency is claimed in Postgres in
+     * the same transaction as all projections, so an uncommitted Redis claim
+     * can never hide an event after a process crash.
+     */
+    public EnrichedEvent parseAndEnrichWithoutDedup(String value, ParseResult outResult) {
+        return parseAndEnrich(value, outResult, false);
+    }
+
+    private EnrichedEvent parseAndEnrich(String value, ParseResult outResult, boolean useRedisDedup) {
         outResult.reset();
         if (value == null || value.isBlank()) {
             outResult.parseError = "empty payload";
@@ -59,7 +72,7 @@ public class EnrichmentPipeline {
             return null;
         }
         outResult.eventId = raw.eventId();
-        if (!dedup.acquire(raw.eventId())) {
+        if (useRedisDedup && !dedup.acquire(raw.eventId())) {
             outResult.duplicate = true;
             return null;
         }

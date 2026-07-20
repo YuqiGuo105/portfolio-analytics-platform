@@ -48,13 +48,19 @@ spring:
       properties:
         max.poll.records: 100
         session.timeout.ms: 30000
+        max.poll.interval.ms: 300000
+        isolation.level: read_committed
     producer:
       acks: all
-      retries: 5
+      retries: 2147483647
       key-serializer: org.apache.kafka.common.serialization.StringSerializer
       value-serializer: org.apache.kafka.common.serialization.StringSerializer
+      properties:
+        enable.idempotence: true
+        max.in.flight.requests.per.connection: 5
+        delivery.timeout.ms: 120000
     listener:
-      ack-mode: manual
+      ack-mode: manual_immediate
       type: batch
       missing-topics-fatal: false
 
@@ -81,6 +87,15 @@ springdoc:
     path: /swagger-ui.html
 
 analytics:
+  kafka:
+    retry-interval-ms: ${ANALYTICS_KAFKA_RETRY_INTERVAL_MS:2000}
+  outbox:
+    enabled: ${ANALYTICS_OUTBOX_ENABLED:true}
+    relay-interval-ms: ${ANALYTICS_OUTBOX_RELAY_INTERVAL_MS:5000}
+    initial-delay-ms: ${ANALYTICS_OUTBOX_INITIAL_DELAY_MS:15000}
+    batch-size: ${ANALYTICS_OUTBOX_BATCH_SIZE:50}
+    lease-seconds: ${ANALYTICS_OUTBOX_LEASE_SECONDS:60}
+    send-timeout-seconds: ${ANALYTICS_OUTBOX_SEND_TIMEOUT_SECONDS:15}
   topics:
     raw: ${ANALYTICS_TOPIC_RAW:analytics.raw.events}
     dlq: ${ANALYTICS_TOPIC_DLQ:analytics.events.dlq}
@@ -128,6 +143,8 @@ analytics:
     enabled: ${ANALYTICS_RETENTION_ENABLED:true}
     five-min-retain-days: ${ANALYTICS_RETENTION_5M_DAYS:3}
     raw-retain-days: ${ANALYTICS_RAW_RETENTION_DAYS:30}
+    inbox-retain-days: ${ANALYTICS_INBOX_RETENTION_DAYS:14}
+    outbox-retain-days: ${ANALYTICS_OUTBOX_RETENTION_DAYS:14}
     batch-size: ${ANALYTICS_RETENTION_BATCH:2000}
     max-per-run: ${ANALYTICS_RETENTION_MAX:50000}
 

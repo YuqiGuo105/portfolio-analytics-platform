@@ -42,6 +42,9 @@ public class AlertEvaluator {
     @Value("${analytics.alerts.notification-retry-batch-size:25}")
     private int notificationRetryBatchSize;
 
+    @Value("${analytics.alerts.lookback-buckets:2}")
+    private int lookbackBuckets;
+
     @Scheduled(cron = "${analytics.alerts.eval-cron:0 * * * * *}")
     public void tick() {
         if (!evalEnabled) {
@@ -59,12 +62,19 @@ public class AlertEvaluator {
 
     void evaluate(AlertRule r) {
         Granularity g = "1d".equals(r.granularity()) ? Granularity.ONE_DAY : Granularity.FIVE_MIN;
-        Instant bucket = g.floor(Instant.now());
-        long count = countMatching(r, bucket);
-        if (!fires(count, r.threshold(), r.comparator())) {
-            return;
+        Instant newest = g.floor(Instant.now());
+        int buckets = Math.max(1, lookbackBuckets);
+        for (int i = 0; i < buckets; i++) {
+            Instant bucket = shiftBack(newest, g, i);
+            long count = countMatching(r, bucket);
+            if (fires(count, r.threshold(), r.comparator())) {
+                openIncident(r, g, bucket, count);
+                return;
+            }
         }
+    }
 
+    private void openIncident(AlertRule r, Granularity g, Instant bucket, long count) {
         Instant cooldownStart = Instant.now().minusSeconds(r.cooldownSeconds());
         if (incidents.existsWithinCooldown(r, cooldownStart)) {
             return;
@@ -77,6 +87,13 @@ public class AlertEvaluator {
                 bucket.getEpochSecond());
 
         incidents.insert(r, bucket, count, dedupKey).ifPresent(this::deliver);
+    }
+
+    private static Instant shiftBack(Instant newest, Granularity granularity, int buckets) {
+        if (buckets == 0) return newest;
+        return "1d".equals(granularity.code())
+                ? newest.minus(Duration.ofDays(buckets))
+                : newest.minus(Duration.ofMinutes(5L * buckets));
     }
 
     void retryPendingNotifications() {
@@ -96,8 +113,8 @@ public class AlertEvaluator {
                 incident.measuredValue(),
                 incident.bucketTime());
         boolean ok = sender.send(Map.of(
-                "eventType", "FEATURE_RELEASED",
-                "topic", "FEATURE_UPDATES",
+                "eventType", "ANALYTICS_ALERT_TRIGGERED",
+                "topic", "ADMIN_ALERTS",
                 "title", "Alert: " + incident.ruleName(),
                 "summary", alertBody,
                 "sourceType", "ALERT",

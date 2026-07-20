@@ -50,6 +50,7 @@ analytics:
     cooldown-default-seconds: 1800        # 30 minutes between repeats per rule+area
     notification-retry-seconds: ${ANALYTICS_ALERT_RETRY_SECONDS:60}
     notification-retry-batch-size: ${ANALYTICS_ALERT_RETRY_BATCH_SIZE:25}
+    lookback-buckets: ${ANALYTICS_ALERT_LOOKBACK_BUCKETS:2}
   # Fail-closed: no defaults. Missing envs make the app refuse to start
   # rather than accept the string "change-me" as a real credential.
   # Provision via Google Secret Manager in prod.

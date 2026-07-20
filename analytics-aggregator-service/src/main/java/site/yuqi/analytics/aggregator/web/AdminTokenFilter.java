@@ -17,7 +17,8 @@ import java.security.MessageDigest;
 @Component
 public class AdminTokenFilter extends OncePerRequestFilter {
 
-    private static final String PREFIX = "/api/admin/";
+    private static final String ADMIN_PREFIX = "/api/admin/";
+    private static final String INTERNAL_PREFIX = "/api/internal/";
     private static final String HEADER = "X-Internal-Token";
 
     private final String expected;
@@ -29,7 +30,7 @@ public class AdminTokenFilter extends OncePerRequestFilter {
     @Override
     protected boolean shouldNotFilter(@NonNull HttpServletRequest request) {
         String path = request.getRequestURI();
-        return path == null || !path.startsWith(PREFIX);
+        return path == null || (!path.startsWith(ADMIN_PREFIX) && !path.startsWith(INTERNAL_PREFIX));
     }
 
     @Override

@@ -14,7 +14,6 @@ import java.util.List;
 
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.mockito.ArgumentMatchers.any;
-import static org.mockito.ArgumentMatchers.anyLong;
 import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.mock;
@@ -31,17 +30,23 @@ import static org.mockito.Mockito.when;
 class RollupUpsertServiceTest {
 
     private JdbcTemplate jdbc;
-    private UniqueSessionCounter sessionCounter;
+    private DurableUniqueSessionCounter sessionCounter;
     private RollupUpsertService svc;
 
     @BeforeEach
     void setUp() {
         jdbc = mock(JdbcTemplate.class);
-        sessionCounter = mock(UniqueSessionCounter.class);
+        sessionCounter = mock(DurableUniqueSessionCounter.class);
         when(jdbc.update(anyString(), (Object[]) any())).thenReturn(1);
         // Default: every session is unique (delta=1), matching old behaviour.
-        when(sessionCounter.addAndDelta(anyString(), anyString(), anyLong(),
-                anyString(), anyString(), anyString(), anyString())).thenReturn(1L);
+        java.util.Set<String> seen = new java.util.HashSet<>();
+        when(sessionCounter.addAndDelta(anyString(), any(Timestamp.class), anyString(),
+                anyString(), anyString(), anyString(), anyString())).thenAnswer(inv -> {
+            String key = inv.getArgument(0) + "|" + inv.getArgument(1) + "|" + inv.getArgument(2)
+                    + "|" + inv.getArgument(3) + "|" + inv.getArgument(4) + "|" + inv.getArgument(5)
+                    + "|" + inv.getArgument(6);
+            return seen.add(key) ? 1L : 0L;
+        });
         svc = new RollupUpsertService(jdbc, sessionCounter);
     }
 
@@ -52,14 +57,14 @@ class RollupUpsertServiceTest {
 
         ArgumentCaptor<Object[]> argsCaptor = ArgumentCaptor.forClass(Object[].class);
         ArgumentCaptor<String> sqlCaptor = ArgumentCaptor.forClass(String.class);
-        verify(jdbc, times(2)).update(sqlCaptor.capture(), (Object[]) argsCaptor.capture());
+        verify(jdbc, times(8)).update(sqlCaptor.capture(), (Object[]) argsCaptor.capture());
 
         // Both calls use the same UPSERT statement.
-        assertThat(sqlCaptor.getAllValues()).hasSize(2);
+        assertThat(sqlCaptor.getAllValues()).hasSize(8);
         assertThat(sqlCaptor.getAllValues().get(0)).contains("on conflict");
 
         List<Object[]> calls = argsCaptor.getAllValues();
-        assertThat(calls).hasSize(2);
+        assertThat(calls).hasSize(8);
 
         // 5m bucket floor of 12:03:00 = 12:00:00 UTC.
         assertThat(((Timestamp) calls.get(0)[1]).toInstant())
@@ -67,9 +72,9 @@ class RollupUpsertServiceTest {
         assertThat(calls.get(0)[2]).isEqualTo("5m");
 
         // 1d bucket floor of 12:03 = 00:00:00 UTC of that day.
-        assertThat(((Timestamp) calls.get(1)[1]).toInstant())
+        assertThat(((Timestamp) calls.get(4)[1]).toInstant())
                 .isEqualTo(Instant.parse("2026-06-23T00:00:00Z"));
-        assertThat(calls.get(1)[2]).isEqualTo("1d");
+        assertThat(calls.get(4)[2]).isEqualTo("1d");
     }
 
     @Test
@@ -107,7 +112,7 @@ class RollupUpsertServiceTest {
         svc.upsert(ev);
 
         ArgumentCaptor<Object[]> args = ArgumentCaptor.forClass(Object[].class);
-        verify(jdbc, times(2)).update(anyString(), (Object[]) args.capture());
+        verify(jdbc, times(8)).update(anyString(), (Object[]) args.capture());
         Object[] first = args.getAllValues().get(0);
         // device_type, browser, os are positions 6, 7, 8.
         assertThat(first[6]).isEqualTo("unknown");
@@ -148,14 +153,15 @@ class RollupUpsertServiceTest {
         // One batch per granularity tier.
         assertThat(calls).hasSize(2);
 
-        // Each granularity tier should collapse to exactly one row.
-        assertThat(calls.get(0)).hasSize(1);
-        assertThat(calls.get(1)).hasSize(1);
+        // One row per geo ancestor: GLOBAL, COUNTRY, REGION and METRO.
+        assertThat(calls.get(0)).hasSize(4);
+        assertThat(calls.get(1)).hasSize(4);
 
         // Counts are aggregated (event_count, unique_sessions are the last two params).
-        Object[] fiveMinRow = calls.get(0).get(0);
+        Object[] fiveMinRow = calls.get(0).stream()
+                .filter(row -> "METRO".equals(row[3])).findFirst().orElseThrow();
         assertThat(fiveMinRow[fiveMinRow.length - 2]).isEqualTo(3L); // event_count
-        assertThat(fiveMinRow[fiveMinRow.length - 1]).isEqualTo(3L); // unique_sessions
+        assertThat(fiveMinRow[fiveMinRow.length - 1]).isEqualTo(1L); // same durable session
     }
 
     @Test
@@ -175,9 +181,9 @@ class RollupUpsertServiceTest {
 
         ArgumentCaptor<List<Object[]>> rowsCaptor = ArgumentCaptor.forClass(List.class);
         verify(jdbc, times(2)).batchUpdate(anyString(), rowsCaptor.capture());
-        // 2 distinct keys → 2 rows per granularity.
-        assertThat(rowsCaptor.getAllValues().get(0)).hasSize(2);
-        assertThat(rowsCaptor.getAllValues().get(1)).hasSize(2);
+        // US metro contributes four ancestors; CA country contributes two.
+        assertThat(rowsCaptor.getAllValues().get(0)).hasSize(6);
+        assertThat(rowsCaptor.getAllValues().get(1)).hasSize(6);
     }
 
     @Test
@@ -196,9 +202,9 @@ class RollupUpsertServiceTest {
 
         // First call returns 1 (new session), second returns 0 (already seen).
         java.util.concurrent.atomic.AtomicInteger callCount = new java.util.concurrent.atomic.AtomicInteger(0);
-        when(sessionCounter.addAndDelta(anyString(), anyString(), anyLong(),
+        when(sessionCounter.addAndDelta(anyString(), any(Timestamp.class), anyString(),
                 anyString(), anyString(), anyString(), eq("sess-1")))
-                .thenAnswer(inv -> callCount.incrementAndGet() == 1 ? 1L : 0L);
+                .thenAnswer(inv -> callCount.getAndIncrement() < 8 ? 1L : 0L);
 
         List<EnrichedEvent> batch = List.of(
                 sampleEvent("e1", ts),
@@ -210,7 +216,8 @@ class RollupUpsertServiceTest {
         ArgumentCaptor<List<Object[]>> rowsCaptor = ArgumentCaptor.forClass(List.class);
         verify(jdbc, times(2)).batchUpdate(anyString(), rowsCaptor.capture());
 
-        Object[] fiveMinRow = rowsCaptor.getAllValues().get(0).get(0);
+        Object[] fiveMinRow = rowsCaptor.getAllValues().get(0).stream()
+                .filter(row -> "METRO".equals(row[3])).findFirst().orElseThrow();
         assertThat(fiveMinRow[fiveMinRow.length - 2]).isEqualTo(2L); // event_count=2
         assertThat(fiveMinRow[fiveMinRow.length - 1]).isEqualTo(1L); // unique_sessions=1
     }
@@ -221,7 +228,7 @@ class RollupUpsertServiceTest {
         Instant ts = Instant.parse("2026-06-23T12:03:00Z");
 
         // Both calls return 1 (each is a new session).
-        when(sessionCounter.addAndDelta(anyString(), anyString(), anyLong(),
+        when(sessionCounter.addAndDelta(anyString(), any(Timestamp.class), anyString(),
                 anyString(), anyString(), anyString(), anyString())).thenReturn(1L);
 
         EnrichedEvent e1 = sampleEvent("e1", ts);
@@ -238,7 +245,8 @@ class RollupUpsertServiceTest {
         ArgumentCaptor<List<Object[]>> rowsCaptor = ArgumentCaptor.forClass(List.class);
         verify(jdbc, times(2)).batchUpdate(anyString(), rowsCaptor.capture());
 
-        Object[] fiveMinRow = rowsCaptor.getAllValues().get(0).get(0);
+        Object[] fiveMinRow = rowsCaptor.getAllValues().get(0).stream()
+                .filter(row -> "METRO".equals(row[3])).findFirst().orElseThrow();
         assertThat(fiveMinRow[fiveMinRow.length - 2]).isEqualTo(2L); // event_count=2
         assertThat(fiveMinRow[fiveMinRow.length - 1]).isEqualTo(2L); // unique_sessions=2
     }
@@ -246,7 +254,7 @@ class RollupUpsertServiceTest {
     @Test
     void hllFailureYieldsZeroUniqueSessions() {
         // When HLL fails (returns 0), unique_sessions should be 0 (fail-open).
-        when(sessionCounter.addAndDelta(anyString(), anyString(), anyLong(),
+        when(sessionCounter.addAndDelta(anyString(), any(Timestamp.class), anyString(),
                 anyString(), anyString(), anyString(), anyString())).thenReturn(0L);
 
         Instant ts = Instant.parse("2026-06-23T12:03:00Z");
@@ -255,7 +263,8 @@ class RollupUpsertServiceTest {
         ArgumentCaptor<List<Object[]>> rowsCaptor = ArgumentCaptor.forClass(List.class);
         verify(jdbc, times(2)).batchUpdate(anyString(), rowsCaptor.capture());
 
-        Object[] fiveMinRow = rowsCaptor.getAllValues().get(0).get(0);
+        Object[] fiveMinRow = rowsCaptor.getAllValues().get(0).stream()
+                .filter(row -> "METRO".equals(row[3])).findFirst().orElseThrow();
         assertThat(fiveMinRow[fiveMinRow.length - 2]).isEqualTo(1L); // event_count=1
         assertThat(fiveMinRow[fiveMinRow.length - 1]).isEqualTo(0L); // unique_sessions=0 (fail-open)
     }
@@ -284,15 +293,15 @@ class RollupUpsertServiceTest {
                 "same-ip-hash",
                 new EnrichedGeo(GeoLevel.METRO, "METRO:US:CA:Stockton", "US", "CA", "Stockton"));
 
-        when(sessionCounter.addAndDelta(anyString(), anyString(), anyLong(),
+        when(sessionCounter.addAndDelta(anyString(), any(Timestamp.class), anyString(),
                 anyString(), anyString(), anyString(), anyString())).thenReturn(1L);
 
         svc.upsertBatch(List.of(desktop, mobile));
 
         // 验证 sessionCounter 收到不同的 session key（ipHash:deviceType）
         ArgumentCaptor<String> sessionKeyCaptor = ArgumentCaptor.forClass(String.class);
-        verify(sessionCounter, times(4)).addAndDelta(
-                anyString(), anyString(), anyLong(),
+        verify(sessionCounter, times(16)).addAndDelta(
+                anyString(), any(Timestamp.class), anyString(),
                 anyString(), anyString(), anyString(), sessionKeyCaptor.capture());
 
         List<String> keys = sessionKeyCaptor.getAllValues();
@@ -323,9 +332,9 @@ class RollupUpsertServiceTest {
         // 两者 session key 相同: "same-ip-hash:mobile"
         String expectedKey = "same-ip-hash:mobile";
         java.util.concurrent.atomic.AtomicInteger calls = new java.util.concurrent.atomic.AtomicInteger(0);
-        when(sessionCounter.addAndDelta(anyString(), anyString(), anyLong(),
+        when(sessionCounter.addAndDelta(anyString(), any(Timestamp.class), anyString(),
                 anyString(), anyString(), anyString(), eq(expectedKey)))
-                .thenAnswer(inv -> calls.incrementAndGet() == 1 ? 1L : 0L);
+                .thenAnswer(inv -> calls.getAndIncrement() < 8 ? 1L : 0L);
 
         svc.upsertBatch(List.of(chrome, safari));
 
@@ -334,8 +343,8 @@ class RollupUpsertServiceTest {
 
         // 验证 session key 都是相同的（不区分浏览器）
         ArgumentCaptor<String> keyCaptor = ArgumentCaptor.forClass(String.class);
-        verify(sessionCounter, times(4)).addAndDelta(
-                anyString(), anyString(), anyLong(),
+        verify(sessionCounter, times(16)).addAndDelta(
+                anyString(), any(Timestamp.class), anyString(),
                 anyString(), anyString(), anyString(), keyCaptor.capture());
         // 所有 session key 都应该是 "same-ip-hash:mobile"
         assertThat(keyCaptor.getAllValues()).containsOnly(expectedKey);
@@ -365,16 +374,17 @@ class RollupUpsertServiceTest {
         // 相同 session key "same-ip-hash:desktop"，第一次 1，第二次 0
         String expectedKey = "same-ip-hash:desktop";
         java.util.concurrent.atomic.AtomicInteger callCount = new java.util.concurrent.atomic.AtomicInteger(0);
-        when(sessionCounter.addAndDelta(anyString(), anyString(), anyLong(),
+        when(sessionCounter.addAndDelta(anyString(), any(Timestamp.class), anyString(),
                 anyString(), anyString(), anyString(), eq(expectedKey)))
-                .thenAnswer(inv -> callCount.incrementAndGet() == 1 ? 1L : 0L);
+                .thenAnswer(inv -> callCount.getAndIncrement() < 8 ? 1L : 0L);
 
         svc.upsertBatch(List.of(e1, e2));
 
         ArgumentCaptor<List<Object[]>> rowsCaptor = ArgumentCaptor.forClass(List.class);
         verify(jdbc, times(2)).batchUpdate(anyString(), rowsCaptor.capture());
 
-        Object[] fiveMinRow = rowsCaptor.getAllValues().get(0).get(0);
+        Object[] fiveMinRow = rowsCaptor.getAllValues().get(0).stream()
+                .filter(row -> "METRO".equals(row[3])).findFirst().orElseThrow();
         assertThat(fiveMinRow[fiveMinRow.length - 2]).isEqualTo(2L); // event_count=2（刷新两次）
         assertThat(fiveMinRow[fiveMinRow.length - 1]).isEqualTo(1L); // unique_sessions=1（同设备）
     }

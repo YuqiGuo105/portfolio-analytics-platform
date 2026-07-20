@@ -39,6 +39,12 @@ public class RetentionService {
     @Value("${analytics.retention.raw-retain-days:30}")
     private int rawRetainDays = 30;
 
+    @Value("${analytics.retention.inbox-retain-days:14}")
+    private int inboxRetainDays = 14;
+
+    @Value("${analytics.retention.outbox-retain-days:14}")
+    private int outboxRetainDays = 14;
+
     public RetentionService(
             JdbcTemplate jdbc,
             @Value("${analytics.retention.enabled:true}") boolean enabled,
@@ -113,5 +119,23 @@ public class RetentionService {
         }
         log.info("{\"event\":\"raw_retention_done\",\"deleted\":{},\"retainDays\":{}}",
                 totalDeleted, rawRetainDays);
+    }
+
+    /** Keep the inbox longer than Kafka retention; clear expired throttle/session state. */
+    @Scheduled(cron = "0 5 4 * * *", zone = "UTC")
+    public void purgeOperationalState() {
+        if (!enabled) return;
+        int inbox = jdbc.update("delete from public.analytics_kafka_inbox " +
+                "where processed_at < now() - make_interval(days => ?)", inboxRetainDays);
+        int throttle = jdbc.update("delete from public.analytics_visit_throttle where expires_at < now()");
+        int sessions5m = jdbc.update("delete from public.analytics_rollup_sessions " +
+                "where granularity = '5m' and bucket_time < now() - make_interval(days => ?)", retainDays);
+        int sessions1d = jdbc.update("delete from public.analytics_rollup_sessions " +
+                "where granularity = '1d' and bucket_time < now() - make_interval(days => ?)", rawRetainDays);
+        int outbox = jdbc.update("delete from public.analytics_event_outbox " +
+                "where status = 'SENT' and sent_at < now() - make_interval(days => ?)", outboxRetainDays);
+        log.info("{\"event\":\"operational_retention_done\",\"inbox\":{},\"throttle\":{}," +
+                        "\"sessions5m\":{},\"sessions1d\":{},\"outbox\":{}}",
+                inbox, throttle, sessions5m, sessions1d, outbox);
     }
 }
