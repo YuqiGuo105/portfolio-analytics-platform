@@ -9,6 +9,7 @@ import java.sql.ResultSet;
 import java.sql.SQLException;
 import java.sql.Timestamp;
 import java.time.Instant;
+import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
 
@@ -21,8 +22,9 @@ class VisitorIntelligenceServiceTest {
 
     @Test
     void buildsCompleteOverviewFromDeterministicReadModels() {
+        StubJdbcTemplate jdbc = new StubJdbcTemplate();
         VisitorIntelligenceService service =
-                new VisitorIntelligenceService(new StubJdbcTemplate(), new ObjectMapper());
+                new VisitorIntelligenceService(jdbc, new ObjectMapper());
 
         VisitorIntelligenceService.VisitorIntelligenceOverview result = service.overview(
                 "yuqi.site",
@@ -50,9 +52,16 @@ class VisitorIntelligenceServiceTest {
                             .containsExactly("page_view", "read_progress");
                 });
         assertThat(result.recentJourneys()).hasSize(1);
+        assertThat(jdbc.journeyQueries)
+                .anySatisfy(sql -> assertThat(sql)
+                        .contains("and i.intent_level in ('HIGH', 'MEDIUM')\n")
+                        .contains("order by i.score desc, s.last_event desc")
+                        .doesNotContain("')order", "byi.score"));
     }
 
     private static final class StubJdbcTemplate extends JdbcTemplate {
+
+        private final List<String> journeyQueries = new ArrayList<>();
 
         @Override
         public <T> T queryForObject(String sql, RowMapper<T> mapper, Object... args) {
@@ -118,6 +127,7 @@ class VisitorIntelligenceServiceTest {
             }
             if (sql.contains("from public.sessions s")
                     && sql.contains("visitor_intent_snapshots")) {
+                journeyQueries.add(sql);
                 return List.of(mapped(mapper, row(Map.ofEntries(
                         Map.entry("session_id", "session-1"),
                         Map.entry("first_event", Timestamp.from(Instant.parse("2026-07-02T10:00:00Z"))),

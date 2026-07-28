@@ -293,8 +293,11 @@ public class VisitorIntelligenceService {
             boolean highIntentOnly,
             int limit) {
         String intentCondition = highIntentOnly
-                ? "and i.intent_level in ('HIGH', 'MEDIUM')" : "";
-        List<JourneyRow> rows = jdbc.query("""
+                ? " and i.intent_level in ('HIGH', 'MEDIUM')\n" : "";
+        String orderBy = highIntentOnly
+                ? "i.score desc, s.last_event desc"
+                : "s.last_event desc";
+        String query = """
                         select s.session_id, s.first_event, s.last_event, s.duration_ms,
                                s.entry_page, s.exit_page, s.device_type, s.browser,
                                s.country, s.geo_area_id,
@@ -307,10 +310,12 @@ public class VisitorIntelligenceService {
                            and s.last_event >= ?
                            and s.first_event < ?
                            and (? or coalesce(s.entry_page, '') not like ?)
-                           """ + intentCondition + """
-                         order by """ + (highIntentOnly ? "i.score desc, " : "") + "s.last_event desc " + """
+                        """ + intentCondition + """
+                         order by %s
                          limit ?
-                        """,
+                        """.formatted(orderBy);
+        List<JourneyRow> rows = jdbc.query(
+                query,
                 (rs, rowNum) -> new JourneyRow(
                         rs.getString("session_id"),
                         rs.getTimestamp("first_event").toInstant(),
