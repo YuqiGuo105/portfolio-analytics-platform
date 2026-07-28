@@ -21,6 +21,7 @@ public class KafkaEventBatchProcessor {
     private final DurableVisitThrottle visitThrottle;
     private final VisitorLogPersistService visitorLogs;
     private final SessionAggregatorService sessions;
+    private final JourneyIntentProjectionService journeyIntent;
     private final RollupUpsertService rollup;
 
     @Transactional
@@ -46,6 +47,7 @@ public class KafkaEventBatchProcessor {
         if (enriched.isEmpty()) return 0;
         visitorLogs.persistBatch(raw, enriched);
         sessions.processBatch(enriched);
+        journeyIntent.processBatch(enriched);
         rollup.upsertBatch(enriched);
         return enriched.size();
     }

@@ -143,6 +143,7 @@ analytics:
     enabled: ${ANALYTICS_RETENTION_ENABLED:true}
     five-min-retain-days: ${ANALYTICS_RETENTION_5M_DAYS:3}
     raw-retain-days: ${ANALYTICS_RAW_RETENTION_DAYS:30}
+    journey-retain-days: ${ANALYTICS_JOURNEY_RETENTION_DAYS:90}
     inbox-retain-days: ${ANALYTICS_INBOX_RETENTION_DAYS:14}
     outbox-retain-days: ${ANALYTICS_OUTBOX_RETENTION_DAYS:14}
     batch-size: ${ANALYTICS_RETENTION_BATCH:2000}

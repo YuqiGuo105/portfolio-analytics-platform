@@ -45,6 +45,9 @@ public class RetentionService {
     @Value("${analytics.retention.outbox-retain-days:14}")
     private int outboxRetainDays = 14;
 
+    @Value("${analytics.retention.journey-retain-days:90}")
+    private int journeyRetainDays = 90;
+
     public RetentionService(
             JdbcTemplate jdbc,
             @Value("${analytics.retention.enabled:true}") boolean enabled,
@@ -134,8 +137,19 @@ public class RetentionService {
                 "where granularity = '1d' and bucket_time < now() - make_interval(days => ?)", rawRetainDays);
         int outbox = jdbc.update("delete from public.analytics_event_outbox " +
                 "where status = 'SENT' and sent_at < now() - make_interval(days => ?)", outboxRetainDays);
+        int intentSnapshots = jdbc.update("delete from public.visitor_intent_snapshots " +
+                "where last_event < now() - make_interval(days => ?)", journeyRetainDays);
+        int journeySteps = jdbc.update("delete from public.visitor_journey_steps " +
+                "where event_time < now() - make_interval(days => ?)", journeyRetainDays);
+        int funnelSteps = jdbc.update("delete from public.funnel_steps " +
+                "where event_time < now() - make_interval(days => ?)", journeyRetainDays);
+        int sessions = jdbc.update("delete from public.sessions " +
+                "where last_event < now() - make_interval(days => ?)", journeyRetainDays);
         log.info("{\"event\":\"operational_retention_done\",\"inbox\":{},\"throttle\":{}," +
-                        "\"sessions5m\":{},\"sessions1d\":{},\"outbox\":{}}",
-                inbox, throttle, sessions5m, sessions1d, outbox);
+                        "\"sessions5m\":{},\"sessions1d\":{},\"outbox\":{}," +
+                        "\"intentSnapshots\":{},\"journeySteps\":{},\"funnelSteps\":{}," +
+                        "\"sessions\":{}}",
+                inbox, throttle, sessions5m, sessions1d, outbox,
+                intentSnapshots, journeySteps, funnelSteps, sessions);
     }
 }

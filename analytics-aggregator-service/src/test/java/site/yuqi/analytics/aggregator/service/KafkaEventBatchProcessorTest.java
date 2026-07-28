@@ -25,6 +25,7 @@ class KafkaEventBatchProcessorTest {
     private DurableVisitThrottle throttle;
     private VisitorLogPersistService visitorLogs;
     private SessionAggregatorService sessions;
+    private JourneyIntentProjectionService journeyIntent;
     private RollupUpsertService rollup;
     private KafkaEventBatchProcessor processor;
 
@@ -34,8 +35,10 @@ class KafkaEventBatchProcessorTest {
         throttle = mock(DurableVisitThrottle.class);
         visitorLogs = mock(VisitorLogPersistService.class);
         sessions = mock(SessionAggregatorService.class);
+        journeyIntent = mock(JourneyIntentProjectionService.class);
         rollup = mock(RollupUpsertService.class);
-        processor = new KafkaEventBatchProcessor(inbox, throttle, visitorLogs, sessions, rollup);
+        processor = new KafkaEventBatchProcessor(
+                inbox, throttle, visitorLogs, sessions, journeyIntent, rollup);
     }
 
     @Test
@@ -48,6 +51,7 @@ class KafkaEventBatchProcessorTest {
         verify(throttle, never()).shouldProcess(record.enriched());
         verify(visitorLogs, never()).persistBatch(anyList(), anyList());
         verify(sessions, never()).processBatch(anyList());
+        verify(journeyIntent, never()).processBatch(anyList());
         verify(rollup, never()).upsertBatch(anyList());
     }
 
@@ -59,11 +63,12 @@ class KafkaEventBatchProcessorTest {
 
         assertThat(processor.process(List.of(record))).isEqualTo(1);
 
-        InOrder order = inOrder(inbox, throttle, visitorLogs, sessions, rollup);
+        InOrder order = inOrder(inbox, throttle, visitorLogs, sessions, journeyIntent, rollup);
         order.verify(inbox).claim(record);
         order.verify(throttle).shouldProcess(record.enriched());
         order.verify(visitorLogs).persistBatch(anyList(), anyList());
         order.verify(sessions).processBatch(anyList());
+        order.verify(journeyIntent).processBatch(anyList());
         order.verify(rollup).upsertBatch(anyList());
     }
 
