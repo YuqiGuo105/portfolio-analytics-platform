@@ -333,7 +333,7 @@ public class VisitorIntelligenceService {
 
         List<JourneySummary> results = new ArrayList<>(rows.size());
         for (JourneyRow row : rows) {
-            List<JourneyStep> steps = jdbc.query("""
+            List<JourneyStep> steps = new ArrayList<>(jdbc.query("""
                             select event_id, event_name, event_time, page_path, target_path,
                                    content_id, content_type, engaged_seconds, progress_percent
                               from public.visitor_journey_steps
@@ -351,7 +351,7 @@ public class VisitorIntelligenceService {
                             rs.getString("content_type"),
                             nullableInteger(rs.getObject("engaged_seconds")),
                             nullableInteger(rs.getObject("progress_percent"))),
-                    siteId, row.sessionId());
+                    siteId, row.sessionId()));
             Collections.reverse(steps);
             results.add(row.withSteps(steps));
         }
