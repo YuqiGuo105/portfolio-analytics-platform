@@ -145,6 +145,13 @@ class PublicVisitsControllerTest {
                 (Map<String, Object>) ctrl.engagement("30d", null, null).getBody();
         Map<String, Object> totals = (Map<String, Object>) body.get("totals");
         assertThat(totals).containsEntry("completionRate", 0.4d);
+
+        ArgumentCaptor<String> sql = ArgumentCaptor.forClass(String.class);
+        verify(jdbc).queryForMap(sql.capture(), any(Object[].class));
+        assertThat(sql.getValue())
+                .contains("event_name IN ('content_open','read_progress')")
+                .contains("event_name = 'read_progress'")
+                .contains("properties->>'progressPercent' = '100'");
     }
 
     @SuppressWarnings("unchecked")

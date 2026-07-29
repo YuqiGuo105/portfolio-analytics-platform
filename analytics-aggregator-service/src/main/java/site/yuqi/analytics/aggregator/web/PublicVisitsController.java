@@ -306,7 +306,8 @@ public class PublicVisitsController {
                     : new Object[]{siteId, ws.timestampSince()};
 
             Map<String, Object> totals = jdbc.queryForMap(
-                    "SELECT count(DISTINCT session_id) FILTER (WHERE event_name = 'content_open') " +
+                    "SELECT count(DISTINCT session_id) FILTER " +
+                    "         (WHERE event_name IN ('content_open','read_progress')) " +
                     "         as \"contentSessions\", " +
                     "       count(DISTINCT session_id) FILTER (WHERE event_name = 'read_progress' " +
                     "         AND properties->>'progressPercent' = '100') as \"completedSessions\", " +
