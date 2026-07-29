@@ -3,6 +3,7 @@ package site.yuqi.analytics.aggregator.web;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
+import org.mockito.ArgumentCaptor;
 import org.springframework.data.redis.core.StringRedisTemplate;
 import org.springframework.data.redis.core.ValueOperations;
 import org.springframework.http.ResponseEntity;
@@ -14,7 +15,10 @@ import java.util.Map;
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyString;
+import static org.mockito.ArgumentMatchers.contains;
 import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.times;
+import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
 class PublicVisitsControllerTest {
@@ -58,8 +62,10 @@ class PublicVisitsControllerTest {
     @SuppressWarnings("unchecked")
     @Test
     void summaryReturnsCompositeMap() {
-        when(jdbc.queryForMap(anyString(), any(Object[].class)))
+        when(jdbc.queryForMap(contains("geo_time_rollups"), any(Object[].class)))
                 .thenReturn(Map.of("events", 100L, "clicks", 10L, "pageViews", 90L));
+        when(jdbc.queryForMap(contains("count(distinct case"), any(Object[].class)))
+                .thenReturn(Map.of("uniqueVisitors", 42L));
         when(jdbc.queryForList(anyString(), any(Object[].class)))
                 .thenReturn(List.of(Map.of("country", "US", "count", 10L)));
 
@@ -74,13 +80,27 @@ class PublicVisitsControllerTest {
         assertThat(out).containsKey("topCountries");
         assertThat(out).containsKey("topDevices");
         assertThat(out).containsKey("timeSeries");
+        assertThat((Map<String, Object>) out.get("totals"))
+                .containsEntry("pageViews", 90L)
+                .containsEntry("uniqueVisitors", 42L);
+
+        ArgumentCaptor<String> sql = ArgumentCaptor.forClass(String.class);
+        verify(jdbc, times(2)).queryForMap(sql.capture(), any(Object[].class));
+        assertThat(sql.getAllValues()).anySatisfy(query -> assertThat(query)
+                .contains("count(distinct case")
+                .contains("event_name = 'page_view'")
+                .contains("is_bot = false")
+                .contains("page_path <> '/admin'")
+                .contains("page_path not like '/admin/%'"));
     }
 
     @SuppressWarnings("unchecked")
     @Test
     void summaryAcceptsWindowParam() {
-        when(jdbc.queryForMap(anyString(), any(Object[].class)))
+        when(jdbc.queryForMap(contains("geo_time_rollups"), any(Object[].class)))
                 .thenReturn(Map.of("events", 1L, "clicks", 0L, "pageViews", 1L));
+        when(jdbc.queryForMap(contains("count(distinct case"), any(Object[].class)))
+                .thenReturn(Map.of("uniqueVisitors", 1L));
         when(jdbc.queryForList(anyString(), any(Object[].class)))
                 .thenReturn(List.of());
 

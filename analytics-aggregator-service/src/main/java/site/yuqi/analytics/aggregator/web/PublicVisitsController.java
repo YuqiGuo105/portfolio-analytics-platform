@@ -163,7 +163,7 @@ public class PublicVisitsController {
     /**
      * Topline stats for the {@code /analytics} page.
      * <ul>
-     *   <li>{@code totals} — total events, total clicks, total page_views</li>
+     *   <li>{@code totals} — total events, clicks, page views, and window-wide deduplicated visitors</li>
      *   <li>{@code topCountries} — top 20 countries by event count</li>
      *   <li>{@code topDevices} — split by deviceType</li>
      *   <li>{@code timeSeries} — daily buckets (events/day)</li>
@@ -176,7 +176,7 @@ public class PublicVisitsController {
             @RequestHeader(value = "If-None-Match", required = false) String ifNoneMatch) {
 
         WindowSpec ws = resolveWindow(window, days);
-        String cacheKey = "pub:summary:" + ws.label;
+        String cacheKey = "pub:summary:v2:" + ws.label;
 
         ResponseCache.CacheEntry hit = cache.get(cacheKey);
         if (hit != null) {
@@ -197,6 +197,22 @@ public class PublicVisitsController {
                 "from public.geo_time_rollups " +
                 "where site_id = ? and granularity = '1d'" + timeFilter,
                 base);
+
+        String visitorTimeFilter = ws.allTime ? "" : " and event_time >= ? ";
+        Map<String, Object> uniqueVisitorsRow = jdbc.queryForMap(
+                "select count(distinct case " +
+                "         when nullif(anon_id_hash, '') is not null then 'anon:' || anon_id_hash " +
+                "         when nullif(session_id, '') is not null then 'session:' || session_id " +
+                "         when nullif(ip_hash, '') is not null then 'ip:' || ip_hash " +
+                "       end) as \"uniqueVisitors\" " +
+                "from public.behavior_events " +
+                "where site_id = ? and event_name = 'page_view' and is_bot = false " +
+                "  and (page_path is null or (page_path <> '/admin' and page_path not like '/admin/%'))" +
+                visitorTimeFilter,
+                base);
+
+        Map<String, Object> totals = new java.util.LinkedHashMap<>(totalsRow);
+        totals.put("uniqueVisitors", longValue(uniqueVisitorsRow.get("uniqueVisitors")));
 
         List<Map<String, Object>> topCountries = jdbc.queryForList(
                 "select country as \"country\", sum(event_count) as \"count\" " +
@@ -224,7 +240,7 @@ public class PublicVisitsController {
                 "siteId", siteId,
                 "window", ws.label,
                 "days", ws.legacyDays,
-                "totals", totalsRow,
+                "totals", totals,
                 "topCountries", topCountries,
                 "topDevices", topDevices,
                 "timeSeries", timeSeries);
