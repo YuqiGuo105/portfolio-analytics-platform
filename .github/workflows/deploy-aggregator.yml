@@ -17,6 +17,10 @@ permissions:
   contents: read
   id-token: write
 
+concurrency:
+  group: deploy-portfolio-analytics-aggregator
+  cancel-in-progress: false
+
 env:
   PROJECT_ID:        portfolio-notify-prod
   REGION:            us-central1
@@ -26,6 +30,7 @@ env:
   WIF_PROVIDER:      ${{ vars.WIF_PROVIDER }}
   DEPLOYER_SA_EMAIL: ${{ vars.DEPLOYER_SA_EMAIL }}
   RUNTIME_SA_EMAIL:  notification-runtime@portfolio-notify-prod.iam.gserviceaccount.com
+  DEPLOY_SHA:        ${{ github.event.workflow_run.head_sha || github.sha }}
 
 jobs:
   deploy:
@@ -38,6 +43,8 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@v4
+        with:
+          ref: ${{ env.DEPLOY_SHA }}
 
       - name: Set up JDK 21
         uses: actions/setup-java@v4
@@ -52,7 +59,7 @@ jobs:
           if [ -n "${{ github.event.inputs.image_tag }}" ]; then
             TAG="${{ github.event.inputs.image_tag }}"
           else
-            TAG="sha-$(echo "${GITHUB_SHA}" | cut -c1-7)"
+            TAG="sha-$(echo "${DEPLOY_SHA}" | cut -c1-7)"
           fi
           echo "tag=${TAG}" >> "$GITHUB_OUTPUT"
 
