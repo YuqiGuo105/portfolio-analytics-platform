@@ -33,7 +33,9 @@ class PublicVisitsControllerTest {
         StringRedisTemplate redis = mock(StringRedisTemplate.class);
         ValueOperations<String, String> ops = mock(ValueOperations.class);
         when(redis.opsForValue()).thenReturn(ops);
-        ResponseCache cache = new ResponseCache(redis, new ObjectMapper(), false, 30);
+        ResponseCache cache = new ResponseCache(
+                redis, new ObjectMapper(), false, 30,
+                false, 5, 500, 40);
         ctrl = new PublicVisitsController(jdbc, cache);
         org.springframework.test.util.ReflectionTestUtils.setField(ctrl, "siteId", "yuqi.site");
         org.springframework.test.util.ReflectionTestUtils.setField(ctrl, "minBucketCount", 5);
@@ -139,7 +141,8 @@ class PublicVisitsControllerTest {
         when(jdbc.queryForMap(anyString(), any(Object[].class))).thenReturn(Map.of(
                 "contentSessions", 10L, "completedSessions", 4L, "engagedSeconds", 300L));
 
-        Map<String, Object> body = (Map<String, Object>) ctrl.engagement("30d", null).getBody();
+        Map<String, Object> body =
+                (Map<String, Object>) ctrl.engagement("30d", null, null).getBody();
         Map<String, Object> totals = (Map<String, Object>) body.get("totals");
         assertThat(totals).containsEntry("completionRate", 0.4d);
     }
@@ -151,7 +154,8 @@ class PublicVisitsControllerTest {
                 .thenReturn(Map.of("impressions", 20L, "clicks", 5L, "dismissals", 1L));
         when(jdbc.queryForList(anyString(), any(Object[].class))).thenReturn(List.of());
 
-        Map<String, Object> body = (Map<String, Object>) ctrl.recommendations("30d", null).getBody();
+        Map<String, Object> body =
+                (Map<String, Object>) ctrl.recommendations("30d", null, null).getBody();
         Map<String, Object> totals = (Map<String, Object>) body.get("totals");
         assertThat(totals).containsEntry("clickThroughRate", 0.25d);
     }

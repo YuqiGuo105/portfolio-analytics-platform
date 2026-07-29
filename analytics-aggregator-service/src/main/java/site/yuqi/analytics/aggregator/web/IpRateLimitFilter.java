@@ -7,12 +7,14 @@ import jakarta.servlet.http.HttpServletResponse;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.data.redis.core.StringRedisTemplate;
+import org.springframework.data.redis.core.script.DefaultRedisScript;
 import org.springframework.lang.NonNull;
 import org.springframework.stereotype.Component;
 import org.springframework.web.filter.OncePerRequestFilter;
 
 import java.io.IOException;
 import java.time.Duration;
+import java.util.List;
 
 /**
  * Per-IP fixed-window rate limit for the {@code /api/public/*} read
@@ -37,6 +39,12 @@ public class IpRateLimitFilter extends OncePerRequestFilter {
 
     /** Only guard the public read surface — actuator and swagger have their own posture. */
     private static final String PROTECTED_PREFIX = "/api/public/";
+    private static final DefaultRedisScript<Long> INCREMENT_WITH_TTL_SCRIPT =
+            new DefaultRedisScript<>(
+                    "local count = redis.call('incr', KEYS[1]); " +
+                            "if count == 1 then redis.call('pexpire', KEYS[1], ARGV[1]); end; " +
+                            "return count",
+                    Long.class);
 
     private final StringRedisTemplate redis;
     private final int limit;
@@ -68,20 +76,18 @@ public class IpRateLimitFilter extends OncePerRequestFilter {
             throws ServletException, IOException {
         String ip = clientIp(req);
         // Fixed-window key: bucket the current wall-clock into window-sized
-        // slices so INCR + EXPIRE gives us a naturally-resetting counter
-        // without needing per-request Lua.
+        // slices. Lua makes INCR + first-write TTL atomic, so a process or
+        // network failure cannot leave an immortal counter key behind.
         long bucket = System.currentTimeMillis() / (window.toMillis());
         String key = "rl:pub:" + ip + ":" + bucket;
         long count;
         try {
-            Long incr = redis.opsForValue().increment(key);
+            long ttlMillis = window.plusSeconds(5).toMillis();
+            Long incr = redis.execute(
+                    INCREMENT_WITH_TTL_SCRIPT,
+                    List.of(key),
+                    String.valueOf(ttlMillis));
             count = incr == null ? 0L : incr;
-            if (count == 1L) {
-                // First hit in this window — set TTL so the key can't leak.
-                // Add one window of grace so a request landing on the
-                // boundary doesn't get its counter evicted mid-bucket.
-                redis.expire(key, window.plusSeconds(5));
-            }
         } catch (RuntimeException e) {
             log.warn("{\"event\":\"ratelimit_redis_error\",\"ip\":\"{}\",\"err\":\"{}\"}",
                     ip, e.getMessage());
@@ -90,7 +96,7 @@ public class IpRateLimitFilter extends OncePerRequestFilter {
         }
 
         if (count > limit) {
-            log.info("{\"event\":\"ratelimit_block\",\"ip\":\"{}\",\"count\":{},\"limit\":{}}}",
+            log.info("{\"event\":\"ratelimit_block\",\"ip\":\"{}\",\"count\":{},\"limit\":{}}",
                     ip, count, limit);
             resp.setStatus(429);
             resp.setHeader("Retry-After", String.valueOf(window.toSeconds()));

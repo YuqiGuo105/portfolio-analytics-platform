@@ -126,18 +126,9 @@ public class PublicVisitsController {
         String cacheKey = "pub:markers:" + ws.label + ":" + geoLevel + ":" + boundedLimit
                 + (bbox != null ? ":" + bbox.minLat + ":" + bbox.maxLat + ":" + bbox.minLng + ":" + bbox.maxLng : "");
 
-        ResponseCache.CacheEntry hit = cache.get(cacheKey);
-        if (hit != null) {
-            if (hit.etag().equals(ifNoneMatch)) {
-                return ResponseEntity.status(HttpStatus.NOT_MODIFIED).eTag(hit.etag()).build();
-            }
-            return ResponseEntity.ok().eTag(hit.etag())
-                    .header("Content-Type", "application/json").body(hit.json());
-        }
-
-        List<Map<String, Object>> result = runMarkersQuery(ws, geoLevel, bbox, boundedLimit);
-        String etag = cache.put(cacheKey, result);
-        return ResponseEntity.ok().eTag(etag).body(result);
+        ResponseCache.CacheResult result = cache.getOrLoad(cacheKey,
+                () -> runMarkersQuery(ws, geoLevel, bbox, boundedLimit));
+        return cached(result, ifNoneMatch);
     }
 
     /**
@@ -178,75 +169,68 @@ public class PublicVisitsController {
         WindowSpec ws = resolveWindow(window, days);
         String cacheKey = "pub:summary:v2:" + ws.label;
 
-        ResponseCache.CacheEntry hit = cache.get(cacheKey);
-        if (hit != null) {
-            if (hit.etag().equals(ifNoneMatch)) {
-                return ResponseEntity.status(HttpStatus.NOT_MODIFIED).eTag(hit.etag()).build();
-            }
-            return ResponseEntity.ok().eTag(hit.etag())
-                    .header("Content-Type", "application/json").body(hit.json());
-        }
+        ResponseCache.CacheResult result = cache.getOrLoad(cacheKey, () -> {
+            String timeFilter = ws.allTime ? "" : "  and bucket_time >= ? ";
+            Object[] base = ws.allTime
+                    ? new Object[]{siteId}
+                    : new Object[]{siteId, ws.timestampSince()};
 
-        String timeFilter = ws.allTime ? "" : "  and bucket_time >= ? ";
-        Object[] base = ws.allTime ? new Object[]{siteId} : new Object[]{siteId, ws.timestampSince()};
+            Map<String, Object> totalsRow = jdbc.queryForMap(
+                    "select coalesce(sum(event_count), 0) as \"events\", " +
+                    "       coalesce(sum(event_count) filter (where event_type = 'click'), 0) as \"clicks\", " +
+                    "       coalesce(sum(event_count) filter (where event_type = 'page_view'), 0) as \"pageViews\" " +
+                    "from public.geo_time_rollups " +
+                    "where site_id = ? and granularity = '1d'" + timeFilter,
+                    base);
 
-        Map<String, Object> totalsRow = jdbc.queryForMap(
-                "select coalesce(sum(event_count), 0) as \"events\", " +
-                "       coalesce(sum(event_count) filter (where event_type = 'click'), 0) as \"clicks\", " +
-                "       coalesce(sum(event_count) filter (where event_type = 'page_view'), 0) as \"pageViews\" " +
-                "from public.geo_time_rollups " +
-                "where site_id = ? and granularity = '1d'" + timeFilter,
-                base);
+            String visitorTimeFilter = ws.allTime ? "" : " and event_time >= ? ";
+            Map<String, Object> uniqueVisitorsRow = jdbc.queryForMap(
+                    "select count(distinct case " +
+                    "         when nullif(anon_id_hash, '') is not null then 'anon:' || anon_id_hash " +
+                    "         when nullif(session_id, '') is not null then 'session:' || session_id " +
+                    "         when nullif(ip_hash, '') is not null then 'ip:' || ip_hash " +
+                    "       end) as \"uniqueVisitors\" " +
+                    "from public.behavior_events " +
+                    "where site_id = ? and event_name = 'page_view' and is_bot = false " +
+                    "  and (page_path is null or (page_path <> '/admin' and page_path not like '/admin/%'))" +
+                    visitorTimeFilter,
+                    base);
 
-        String visitorTimeFilter = ws.allTime ? "" : " and event_time >= ? ";
-        Map<String, Object> uniqueVisitorsRow = jdbc.queryForMap(
-                "select count(distinct case " +
-                "         when nullif(anon_id_hash, '') is not null then 'anon:' || anon_id_hash " +
-                "         when nullif(session_id, '') is not null then 'session:' || session_id " +
-                "         when nullif(ip_hash, '') is not null then 'ip:' || ip_hash " +
-                "       end) as \"uniqueVisitors\" " +
-                "from public.behavior_events " +
-                "where site_id = ? and event_name = 'page_view' and is_bot = false " +
-                "  and (page_path is null or (page_path <> '/admin' and page_path not like '/admin/%'))" +
-                visitorTimeFilter,
-                base);
+            Map<String, Object> totals = new java.util.LinkedHashMap<>(totalsRow);
+            totals.put("uniqueVisitors", longValue(uniqueVisitorsRow.get("uniqueVisitors")));
 
-        Map<String, Object> totals = new java.util.LinkedHashMap<>(totalsRow);
-        totals.put("uniqueVisitors", longValue(uniqueVisitorsRow.get("uniqueVisitors")));
+            List<Map<String, Object>> topCountries = jdbc.queryForList(
+                    "select country as \"country\", sum(event_count) as \"count\" " +
+                    "from public.geo_time_rollups " +
+                    "where site_id = ? and granularity = '1d' and event_type = 'page_view'" +
+                    timeFilter + " and country <> '' " +
+                    "group by country order by sum(event_count) desc limit 20",
+                    base);
 
-        List<Map<String, Object>> topCountries = jdbc.queryForList(
-                "select country as \"country\", sum(event_count) as \"count\" " +
-                "from public.geo_time_rollups " +
-                "where site_id = ? and granularity = '1d' and event_type = 'page_view'" +
-                timeFilter + " and country <> '' " +
-                "group by country order by sum(event_count) desc limit 20",
-                base);
+            List<Map<String, Object>> topDevices = jdbc.queryForList(
+                    "select device_type as \"deviceType\", sum(event_count) as \"count\" " +
+                    "from public.geo_time_rollups " +
+                    "where site_id = ? and granularity = '1d' and event_type = 'page_view'" + timeFilter +
+                    "group by device_type order by sum(event_count) desc",
+                    base);
 
-        List<Map<String, Object>> topDevices = jdbc.queryForList(
-                "select device_type as \"deviceType\", sum(event_count) as \"count\" " +
-                "from public.geo_time_rollups " +
-                "where site_id = ? and granularity = '1d' and event_type = 'page_view'" + timeFilter +
-                "group by device_type order by sum(event_count) desc",
-                base);
+            List<Map<String, Object>> timeSeries = jdbc.queryForList(
+                    "select bucket_time as \"bucketTime\", sum(event_count) as \"count\" " +
+                    "from public.geo_time_rollups " +
+                    "where site_id = ? and granularity = '1d' and event_type = 'page_view'" + timeFilter +
+                    "group by bucket_time order by bucket_time",
+                    base);
 
-        List<Map<String, Object>> timeSeries = jdbc.queryForList(
-                "select bucket_time as \"bucketTime\", sum(event_count) as \"count\" " +
-                "from public.geo_time_rollups " +
-                "where site_id = ? and granularity = '1d' and event_type = 'page_view'" + timeFilter +
-                "group by bucket_time order by bucket_time",
-                base);
-
-        Map<String, Object> result = Map.of(
-                "siteId", siteId,
-                "window", ws.label,
-                "days", ws.legacyDays,
-                "totals", totals,
-                "topCountries", topCountries,
-                "topDevices", topDevices,
-                "timeSeries", timeSeries);
-
-        String etag = cache.put(cacheKey, result);
-        return ResponseEntity.ok().eTag(etag).body(result);
+            return Map.of(
+                    "siteId", siteId,
+                    "window", ws.label,
+                    "days", ws.legacyDays,
+                    "totals", totals,
+                    "topCountries", topCountries,
+                    "topDevices", topDevices,
+                    "timeSeries", timeSeries);
+        });
+        return cached(result, ifNoneMatch);
     }
 
     /** Privacy-filtered content performance backed by canonical behavior facts. */
@@ -257,27 +241,25 @@ public class PublicVisitsController {
             @RequestHeader(value = "If-None-Match", required = false) String ifNoneMatch) {
         WindowSpec ws = resolveWindow(window, days);
         String cacheKey = "pub:top-pages:" + ws.label;
-        ResponseCache.CacheEntry hit = cache.get(cacheKey);
-        if (hit != null) return cached(hit, ifNoneMatch);
+        ResponseCache.CacheResult result = cache.getOrLoad(cacheKey, () -> {
+            String timeFilter = ws.allTime ? "" : " AND event_time >= ? ";
+            List<Object> params = new ArrayList<>(List.of(siteId));
+            if (!ws.allTime) params.add(ws.timestampSince());
+            params.add(minBucketCount);
 
-        String timeFilter = ws.allTime ? "" : " AND event_time >= ? ";
-        List<Object> params = new ArrayList<>(List.of(siteId));
-        if (!ws.allTime) params.add(ws.timestampSince());
-        params.add(minBucketCount);
+            List<Map<String, Object>> items = jdbc.queryForList(
+                    "SELECT page_path as \"page\", count(*) as \"views\", " +
+                    "       count(DISTINCT session_id) as \"uniqueSessions\" " +
+                    "FROM public.behavior_events " +
+                    "WHERE site_id = ? AND event_name IN ('page_view','content_open') " +
+                    "  AND is_bot = false AND page_path IS NOT NULL" + timeFilter +
+                    "GROUP BY page_path HAVING count(*) >= ? " +
+                    "ORDER BY count(*) DESC LIMIT 25", params.toArray());
 
-        List<Map<String, Object>> items = jdbc.queryForList(
-                "SELECT page_path as \"page\", count(*) as \"views\", " +
-                "       count(DISTINCT session_id) as \"uniqueSessions\" " +
-                "FROM public.behavior_events " +
-                "WHERE site_id = ? AND event_name IN ('page_view','content_open') " +
-                "  AND is_bot = false AND page_path IS NOT NULL" + timeFilter +
-                "GROUP BY page_path HAVING count(*) >= ? " +
-                "ORDER BY count(*) DESC LIMIT 25", params.toArray());
-
-        Map<String, Object> result = Map.of("items", items, "window", ws.label,
-                "minBucketCount", minBucketCount);
-        String etag = cache.put(cacheKey, result);
-        return ResponseEntity.ok().eTag(etag).body(result);
+            return Map.of("items", items, "window", ws.label,
+                    "minBucketCount", minBucketCount);
+        });
+        return cached(result, ifNoneMatch);
     }
 
     /** Privacy-filtered acquisition summary; only domains, never full referrer URLs. */
@@ -288,95 +270,104 @@ public class PublicVisitsController {
             @RequestHeader(value = "If-None-Match", required = false) String ifNoneMatch) {
         WindowSpec ws = resolveWindow(window, days);
         String cacheKey = "pub:referrers:" + ws.label;
-        ResponseCache.CacheEntry hit = cache.get(cacheKey);
-        if (hit != null) return cached(hit, ifNoneMatch);
+        ResponseCache.CacheResult result = cache.getOrLoad(cacheKey, () -> {
+            String timeFilter = ws.allTime ? "" : " AND event_time >= ? ";
+            List<Object> params = new ArrayList<>(List.of(siteId));
+            if (!ws.allTime) params.add(ws.timestampSince());
+            params.add(minBucketCount);
 
-        String timeFilter = ws.allTime ? "" : " AND event_time >= ? ";
-        List<Object> params = new ArrayList<>(List.of(siteId));
-        if (!ws.allTime) params.add(ws.timestampSince());
-        params.add(minBucketCount);
+            List<Map<String, Object>> items = jdbc.queryForList(
+                    "SELECT referrer_domain as \"referrer\", count(*) as \"count\", " +
+                    "       count(DISTINCT session_id) as \"uniqueSessions\" " +
+                    "FROM public.behavior_events " +
+                    "WHERE site_id = ? AND event_name = 'page_view' AND is_bot = false " +
+                    "  AND referrer_domain IS NOT NULL AND referrer_domain <> ''" + timeFilter +
+                    "GROUP BY referrer_domain HAVING count(*) >= ? " +
+                    "ORDER BY count(*) DESC LIMIT 25", params.toArray());
 
-        List<Map<String, Object>> items = jdbc.queryForList(
-                "SELECT referrer_domain as \"referrer\", count(*) as \"count\", " +
-                "       count(DISTINCT session_id) as \"uniqueSessions\" " +
-                "FROM public.behavior_events " +
-                "WHERE site_id = ? AND event_name = 'page_view' AND is_bot = false " +
-                "  AND referrer_domain IS NOT NULL AND referrer_domain <> ''" + timeFilter +
-                "GROUP BY referrer_domain HAVING count(*) >= ? " +
-                "ORDER BY count(*) DESC LIMIT 25", params.toArray());
-
-        Map<String, Object> result = Map.of("items", items, "window", ws.label,
-                "minBucketCount", minBucketCount);
-        String etag = cache.put(cacheKey, result);
-        return ResponseEntity.ok().eTag(etag).body(result);
+            return Map.of("items", items, "window", ws.label,
+                    "minBucketCount", minBucketCount);
+        });
+        return cached(result, ifNoneMatch);
     }
 
     /** Reading-depth and active-time metrics for content analysis. */
     @GetMapping("/visits/engagement")
     public ResponseEntity<?> engagement(
             @RequestParam(value = "window", required = false) String window,
-            @RequestParam(value = "days", required = false) Integer days) {
+            @RequestParam(value = "days", required = false) Integer days,
+            @RequestHeader(value = "If-None-Match", required = false) String ifNoneMatch) {
         WindowSpec ws = resolveWindow(window, days);
-        String timeFilter = ws.allTime ? "" : " AND event_time >= ? ";
-        Object[] params = ws.allTime ? new Object[]{siteId} : new Object[]{siteId, ws.timestampSince()};
+        String cacheKey = "pub:engagement:" + ws.label;
+        ResponseCache.CacheResult result = cache.getOrLoad(cacheKey, () -> {
+            String timeFilter = ws.allTime ? "" : " AND event_time >= ? ";
+            Object[] params = ws.allTime
+                    ? new Object[]{siteId}
+                    : new Object[]{siteId, ws.timestampSince()};
 
-        Map<String, Object> totals = jdbc.queryForMap(
-                "SELECT count(DISTINCT session_id) FILTER (WHERE event_name = 'content_open') " +
-                "         as \"contentSessions\", " +
-                "       count(DISTINCT session_id) FILTER (WHERE event_name = 'read_progress' " +
-                "         AND properties->>'progressPercent' = '100') as \"completedSessions\", " +
-                "       coalesce(sum(CASE WHEN event_name = 'engaged_time' " +
-                "         AND properties->>'engagedSeconds' ~ '^[0-9]+$' " +
-                "         THEN (properties->>'engagedSeconds')::bigint ELSE 0 END), 0) " +
-                "         as \"engagedSeconds\" " +
-                "FROM public.behavior_events WHERE site_id = ? AND is_bot = false" + timeFilter,
-                params);
+            Map<String, Object> totals = jdbc.queryForMap(
+                    "SELECT count(DISTINCT session_id) FILTER (WHERE event_name = 'content_open') " +
+                    "         as \"contentSessions\", " +
+                    "       count(DISTINCT session_id) FILTER (WHERE event_name = 'read_progress' " +
+                    "         AND properties->>'progressPercent' = '100') as \"completedSessions\", " +
+                    "       coalesce(sum(CASE WHEN event_name = 'engaged_time' " +
+                    "         AND properties->>'engagedSeconds' ~ '^[0-9]+$' " +
+                    "         THEN (properties->>'engagedSeconds')::bigint ELSE 0 END), 0) " +
+                    "         as \"engagedSeconds\" " +
+                    "FROM public.behavior_events WHERE site_id = ? AND is_bot = false" + timeFilter,
+                    params);
 
-        totals = new java.util.LinkedHashMap<>(totals);
-        long contentSessions = longValue(totals.get("contentSessions"));
-        totals.put("completionRate", contentSessions == 0 ? 0.0
-                : (double) longValue(totals.get("completedSessions")) / contentSessions);
-        Map<String, Object> result = Map.of("totals", totals, "window", ws.label);
-        return ResponseEntity.ok(result);
+            totals = new java.util.LinkedHashMap<>(totals);
+            long contentSessions = longValue(totals.get("contentSessions"));
+            totals.put("completionRate", contentSessions == 0 ? 0.0
+                    : (double) longValue(totals.get("completedSessions")) / contentSessions);
+            return Map.of("totals", totals, "window", ws.label);
+        });
+        return cached(result, ifNoneMatch);
     }
 
     /** Recommendation feedback joined by request/model metadata in event properties. */
     @GetMapping("/visits/recommendations")
     public ResponseEntity<?> recommendations(
             @RequestParam(value = "window", required = false) String window,
-            @RequestParam(value = "days", required = false) Integer days) {
+            @RequestParam(value = "days", required = false) Integer days,
+            @RequestHeader(value = "If-None-Match", required = false) String ifNoneMatch) {
         WindowSpec ws = resolveWindow(window, days);
-        String timeFilter = ws.allTime ? "" : " AND event_time >= ? ";
-        List<Object> base = new ArrayList<>(List.of(siteId));
-        if (!ws.allTime) base.add(ws.timestampSince());
+        String cacheKey = "pub:recommendations:" + ws.label;
+        ResponseCache.CacheResult result = cache.getOrLoad(cacheKey, () -> {
+            String timeFilter = ws.allTime ? "" : " AND event_time >= ? ";
+            List<Object> base = new ArrayList<>(List.of(siteId));
+            if (!ws.allTime) base.add(ws.timestampSince());
 
-        Map<String, Object> totals = jdbc.queryForMap(
-                "SELECT count(*) FILTER (WHERE event_name = 'recommendation_impression') as \"impressions\", " +
-                "       count(*) FILTER (WHERE event_name = 'recommendation_click') as \"clicks\", " +
-                "       count(*) FILTER (WHERE event_name = 'recommendation_dismiss') as \"dismissals\" " +
-                "FROM public.behavior_events WHERE site_id = ? AND is_bot = false" + timeFilter,
-                base.toArray());
+            Map<String, Object> totals = jdbc.queryForMap(
+                    "SELECT count(*) FILTER (WHERE event_name = 'recommendation_impression') as \"impressions\", " +
+                    "       count(*) FILTER (WHERE event_name = 'recommendation_click') as \"clicks\", " +
+                    "       count(*) FILTER (WHERE event_name = 'recommendation_dismiss') as \"dismissals\" " +
+                    "FROM public.behavior_events WHERE site_id = ? AND is_bot = false" + timeFilter,
+                    base.toArray());
 
-        List<Object> itemParams = new ArrayList<>(base);
-        itemParams.add(minBucketCount);
-        List<Map<String, Object>> items = jdbc.queryForList(
-                "SELECT properties->>'contentId' as \"contentId\", " +
-                " count(*) FILTER (WHERE event_name = 'recommendation_impression') as \"impressions\", " +
-                " count(*) FILTER (WHERE event_name = 'recommendation_click') as \"clicks\" " +
-                "FROM public.behavior_events WHERE site_id = ? AND is_bot = false " +
-                " AND event_name IN ('recommendation_impression','recommendation_click','recommendation_dismiss') " +
-                " AND properties->>'contentId' IS NOT NULL" + timeFilter +
-                " GROUP BY properties->>'contentId' " +
-                " HAVING count(*) FILTER (WHERE event_name = 'recommendation_impression') >= ? " +
-                " ORDER BY count(*) FILTER (WHERE event_name = 'recommendation_click') DESC LIMIT 25",
-                itemParams.toArray());
+            List<Object> itemParams = new ArrayList<>(base);
+            itemParams.add(minBucketCount);
+            List<Map<String, Object>> items = jdbc.queryForList(
+                    "SELECT properties->>'contentId' as \"contentId\", " +
+                    " count(*) FILTER (WHERE event_name = 'recommendation_impression') as \"impressions\", " +
+                    " count(*) FILTER (WHERE event_name = 'recommendation_click') as \"clicks\" " +
+                    "FROM public.behavior_events WHERE site_id = ? AND is_bot = false " +
+                    " AND event_name IN ('recommendation_impression','recommendation_click','recommendation_dismiss') " +
+                    " AND properties->>'contentId' IS NOT NULL" + timeFilter +
+                    " GROUP BY properties->>'contentId' " +
+                    " HAVING count(*) FILTER (WHERE event_name = 'recommendation_impression') >= ? " +
+                    " ORDER BY count(*) FILTER (WHERE event_name = 'recommendation_click') DESC LIMIT 25",
+                    itemParams.toArray());
 
-        totals = new java.util.LinkedHashMap<>(totals);
-        long impressions = longValue(totals.get("impressions"));
-        totals.put("clickThroughRate", impressions == 0 ? 0.0
-                : (double) longValue(totals.get("clicks")) / impressions);
-        return ResponseEntity.ok(Map.of("totals", totals, "items", items,
-                "window", ws.label, "minBucketCount", minBucketCount));
+            totals = new java.util.LinkedHashMap<>(totals);
+            long impressions = longValue(totals.get("impressions"));
+            totals.put("clickThroughRate", impressions == 0 ? 0.0
+                    : (double) longValue(totals.get("clicks")) / impressions);
+            return Map.of("totals", totals, "items", items,
+                    "window", ws.label, "minBucketCount", minBucketCount);
+        });
+        return cached(result, ifNoneMatch);
     }
 
     // ────────────────────────────────────────────────────────────────────
@@ -394,39 +385,31 @@ public class PublicVisitsController {
 
         WindowSpec ws = resolveWindow(window, days);
         String cacheKey = "pub:sessions:" + ws.label;
+        ResponseCache.CacheResult result = cache.getOrLoad(cacheKey, () -> {
+            String timeFilter = ws.allTime ? "" : " AND first_event >= ? ";
+            Object[] params = ws.allTime
+                    ? new Object[]{siteId}
+                    : new Object[]{siteId, ws.timestampSince()};
 
-        ResponseCache.CacheEntry hit = cache.get(cacheKey);
-        if (hit != null) {
-            if (hit.etag().equals(ifNoneMatch)) {
-                return ResponseEntity.status(HttpStatus.NOT_MODIFIED).eTag(hit.etag()).build();
-            }
-            return ResponseEntity.ok().eTag(hit.etag())
-                    .header("Content-Type", "application/json").body(hit.json());
-        }
+            Map<String, Object> stats = jdbc.queryForMap(
+                    "SELECT count(*) as \"totalSessions\", " +
+                    "       coalesce(avg(duration_ms), 0) as \"avgDurationMs\", " +
+                    "       coalesce(sum(CASE WHEN page_views <= 1 THEN 1 ELSE 0 END)::float / " +
+                    "         NULLIF(count(*), 0), 0) as \"bounceRate\" " +
+                    "FROM public.sessions WHERE site_id = ?" + timeFilter, params);
 
-        String timeFilter = ws.allTime ? "" : " AND first_event >= ? ";
-        Object[] params = ws.allTime ? new Object[]{siteId} : new Object[]{siteId, ws.timestampSince()};
+            List<Map<String, Object>> topEntry = jdbc.queryForList(
+                    "SELECT entry_page as \"page\", count(*) as \"count\" " +
+                    "FROM public.sessions WHERE site_id = ?" + timeFilter +
+                    " AND entry_page IS NOT NULL " +
+                    "GROUP BY entry_page ORDER BY count(*) DESC LIMIT 10", params);
 
-        Map<String, Object> stats = jdbc.queryForMap(
-                "SELECT count(*) as \"totalSessions\", " +
-                "       coalesce(avg(duration_ms), 0) as \"avgDurationMs\", " +
-                "       coalesce(sum(CASE WHEN page_views <= 1 THEN 1 ELSE 0 END)::float / " +
-                "         NULLIF(count(*), 0), 0) as \"bounceRate\" " +
-                "FROM public.sessions WHERE site_id = ?" + timeFilter, params);
-
-        List<Map<String, Object>> topEntry = jdbc.queryForList(
-                "SELECT entry_page as \"page\", count(*) as \"count\" " +
-                "FROM public.sessions WHERE site_id = ?" + timeFilter +
-                " AND entry_page IS NOT NULL " +
-                "GROUP BY entry_page ORDER BY count(*) DESC LIMIT 10", params);
-
-        Map<String, Object> result = Map.of(
-                "stats", stats,
-                "topEntryPages", topEntry,
-                "window", ws.label);
-
-        String etag = cache.put(cacheKey, result);
-        return ResponseEntity.ok().eTag(etag).body(result);
+            return Map.of(
+                    "stats", stats,
+                    "topEntryPages", topEntry,
+                    "window", ws.label);
+        });
+        return cached(result, ifNoneMatch);
     }
 
     /**
@@ -440,42 +423,34 @@ public class PublicVisitsController {
 
         WindowSpec ws = resolveWindow(window, days);
         String cacheKey = "pub:funnel:" + ws.label;
+        ResponseCache.CacheResult result = cache.getOrLoad(cacheKey, () -> {
+            String timeFilter = ws.allTime ? "" : " AND event_time >= ? ";
+            Object[] params = ws.allTime
+                    ? new Object[]{siteId}
+                    : new Object[]{siteId, ws.timestampSince()};
 
-        ResponseCache.CacheEntry hit = cache.get(cacheKey);
-        if (hit != null) {
-            if (hit.etag().equals(ifNoneMatch)) {
-                return ResponseEntity.status(HttpStatus.NOT_MODIFIED).eTag(hit.etag()).build();
-            }
-            return ResponseEntity.ok().eTag(hit.etag())
-                    .header("Content-Type", "application/json").body(hit.json());
-        }
+            List<Object> funnelParams = new ArrayList<>(java.util.Arrays.asList(params));
+            funnelParams.add(minBucketCount);
+            List<Map<String, Object>> steps = jdbc.queryForList(
+                    "WITH first_steps AS (" +
+                    " SELECT session_id, step_name, step_order, min(event_time) AS event_time" +
+                    " FROM public.funnel_steps WHERE site_id = ?" + timeFilter +
+                    " GROUP BY session_id, step_name, step_order" +
+                    ") SELECT current.step_name as \"step\", current.step_order as \"stepOrder\"," +
+                    " count(DISTINCT current.session_id) as \"sessions\"" +
+                    " FROM first_steps current" +
+                    " WHERE NOT EXISTS (" +
+                    "   SELECT 1 FROM generate_series(1, current.step_order - 1) prior_order" +
+                    "   LEFT JOIN first_steps prior ON prior.session_id = current.session_id" +
+                    "     AND prior.step_order = prior_order" +
+                    "   WHERE prior.event_time IS NULL OR prior.event_time > current.event_time" +
+                    " ) GROUP BY current.step_name, current.step_order" +
+                    " HAVING count(DISTINCT current.session_id) >= ?" +
+                    " ORDER BY current.step_order", funnelParams.toArray());
 
-        String timeFilter = ws.allTime ? "" : " AND event_time >= ? ";
-        Object[] params = ws.allTime ? new Object[]{siteId} : new Object[]{siteId, ws.timestampSince()};
-
-        List<Object> funnelParams = new ArrayList<>(java.util.Arrays.asList(params));
-        funnelParams.add(minBucketCount);
-        List<Map<String, Object>> steps = jdbc.queryForList(
-                "WITH first_steps AS (" +
-                " SELECT session_id, step_name, step_order, min(event_time) AS event_time" +
-                " FROM public.funnel_steps WHERE site_id = ?" + timeFilter +
-                " GROUP BY session_id, step_name, step_order" +
-                ") SELECT current.step_name as \"step\", current.step_order as \"stepOrder\"," +
-                " count(DISTINCT current.session_id) as \"sessions\"" +
-                " FROM first_steps current" +
-                " WHERE NOT EXISTS (" +
-                "   SELECT 1 FROM generate_series(1, current.step_order - 1) prior_order" +
-                "   LEFT JOIN first_steps prior ON prior.session_id = current.session_id" +
-                "     AND prior.step_order = prior_order" +
-                "   WHERE prior.event_time IS NULL OR prior.event_time > current.event_time" +
-                " ) GROUP BY current.step_name, current.step_order" +
-                " HAVING count(DISTINCT current.session_id) >= ?" +
-                " ORDER BY current.step_order", funnelParams.toArray());
-
-        Map<String, Object> result = Map.of("steps", steps, "window", ws.label);
-
-        String etag = cache.put(cacheKey, result);
-        return ResponseEntity.ok().eTag(etag).body(result);
+            return Map.of("steps", steps, "window", ws.label);
+        });
+        return cached(result, ifNoneMatch);
     }
 
     // ────────────────────────────────────────────────────────────────────
@@ -540,12 +515,12 @@ public class PublicVisitsController {
         return jdbc.queryForList(sql.toString(), params.toArray());
     }
 
-    private static ResponseEntity<?> cached(ResponseCache.CacheEntry hit, String ifNoneMatch) {
-        if (hit.etag().equals(ifNoneMatch)) {
-            return ResponseEntity.status(HttpStatus.NOT_MODIFIED).eTag(hit.etag()).build();
+    private static ResponseEntity<?> cached(ResponseCache.CacheResult result, String ifNoneMatch) {
+        if (result.etag().equals(ifNoneMatch)) {
+            return ResponseEntity.status(HttpStatus.NOT_MODIFIED).eTag(result.etag()).build();
         }
-        return ResponseEntity.ok().eTag(hit.etag())
-                .header("Content-Type", "application/json").body(hit.json());
+        return ResponseEntity.ok().eTag(result.etag())
+                .header("Content-Type", "application/json").body(result.body());
     }
 
     private static long longValue(Object value) {

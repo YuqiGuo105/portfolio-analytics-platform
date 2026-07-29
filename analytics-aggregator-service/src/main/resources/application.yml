@@ -5,7 +5,11 @@ spring:
   data:
     redis:
       url: ${VALKEY_URL:redis://localhost:6379}
-      timeout: 2000
+      # Valkey is an optimization, never the source of truth. Keep both
+      # timeouts below the public API latency budget so failures degrade to
+      # Postgres quickly instead of tying up request threads.
+      connect-timeout: ${VALKEY_CONNECT_TIMEOUT:1s}
+      timeout: ${VALKEY_COMMAND_TIMEOUT:500ms}
 
   datasource:
     url: ${SPRING_DATASOURCE_URL:jdbc:postgresql://localhost:5432/postgres}
@@ -117,6 +121,14 @@ analytics:
     cache:
       enabled: ${PUBLIC_CACHE_ENABLED:true}
       ttl-seconds: ${PUBLIC_CACHE_TTL_SECONDS:30}
+      # Distributed single-flight guard for cache misses. The lease always
+      # expires, contenders wait only briefly, and all Valkey failures fall
+      # back to the authoritative Postgres query.
+      lock:
+        enabled: ${PUBLIC_CACHE_LOCK_ENABLED:true}
+        lease-seconds: ${PUBLIC_CACHE_LOCK_LEASE_SECONDS:5}
+        wait-millis: ${PUBLIC_CACHE_LOCK_WAIT_MILLIS:500}
+        poll-millis: ${PUBLIC_CACHE_LOCK_POLL_MILLIS:40}
   admin:
     # Used only by the server-side Portfolio admin proxy. The browser never
     # receives this token and /api/public remains independently accessible.
