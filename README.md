@@ -7,169 +7,48 @@ Powers the **rotating globe** on the homepage dashboard and the
 
 ---
 
-## 1. Architecture
+## 1. System Design
 
-### 1.1 System-component diagram (UML / C4-style)
+### 1.1 Visitor Intelligence Architecture
 
-```mermaid
-flowchart LR
-    %% =================== external actors / clients ===================
-    visitor(["Browser visitor"]):::actor
-    admin(["Operator (admin CRUD)"]):::actor
+The component view follows a visitor event from first-party capture through
+durable Kafka ingestion, session aggregation, query/alert read models, and
+bounded replay with auditable checkpoints.
 
-    %% =================== Portfolio frontend (Vercel) ===================
-    subgraph PORTFOLIO["Portfolio · Next.js on Vercel"]
-        direction TB
-        dash["DashboardPanels<br/>globe + KPIs + 'More' button"]:::ui
-        analyticsPage["/analytics page<br/>globe + drill-down"]:::ui
-            sdk["Behavior SDK<br/>session + engagement"]:::comp
-            ingest["/api/track<br/>schema + allowlist"]:::api
-        proxy["/api/analytics/[...path]<br/>same-origin read proxy"]:::api
-    end
+<img src="docs/architecture/visitor-intelligence.svg" alt="Visitor intelligence platform architecture" width="100%" />
 
-    %% =================== managed services ===================
-    subgraph MANAGED["Managed services"]
-        direction TB
-        kraw[("Kafka topic<br/>analytics.raw.events<br/>2 partitions")]:::topic
-        kdlq[("Kafka topic<br/>analytics.events.dlq<br/>2 partitions")]:::topic
-        redis[("Redis<br/>event_id SETNX dedup")]:::cache
-    end
+> **Maintain this diagram:** edit [`docs/architecture/visitor-intelligence.json`](docs/architecture/visitor-intelligence.json), then run `node scripts/render-architecture-diagram.mjs docs/architecture/visitor-intelligence.json`.
 
-    %% =================== this repo (Render) ===================
-    subgraph PLATFORM["portfolio-analytics-platform · Render"]
-        direction TB
+## Production Operating Model
 
-        subgraph AGG["service: analytics-aggregator-service :8093"]
-            direction TB
-            consumer["RawEventConsumer<br/>@KafkaListener<br/>DONE / DLQ / RETRY"]:::comp
-            pipeline["EnrichmentPipeline<br/>parse · UA · bot · HMAC ip_hash · GeoSnap to METRO"]:::comp
-            dedupSvc["DedupService<br/>SETNX guard"]:::comp
-            rollup["RollupUpsertService<br/>5m + 1d UPSERT"]:::comp
-            sessionizer["SessionAggregatorService<br/>session + ordered funnel"]:::comp
-            backfill["BackfillService + Runner<br/>visitor_logs / clicks → pipeline → upsert"]:::comp
-            publicApi["PublicVisitsController<br/>GET /api/public/visits/*"]:::comp
-            dlqProd["DlqProducer"]:::comp
-        end
+This repository owns the **visitor intelligence plane**. The product surface is
+simple (homepage globe, admin visitor logs, alerts), but the backend behaves
+like an analytics system: append-only ingest, replay-safe enrichment,
+pre-aggregated read models, and protected exact-data access.
 
-        subgraph ALERTS["service: analytics-alerts-service :8094"]
-            direction TB
-            adminApi["AlertRuleController<br/>X-Internal-Token gated CRUD"]:::comp
-            evaluator["AlertEvaluator<br/>@Scheduled · 1 min"]:::comp
-            sender["NotificationSender<br/>HTTP POST"]:::comp
-        end
-    end
+Senior/staff-level guarantees:
 
-    %% =================== persistence (Supabase) ===================
-    subgraph SUPABASE["Supabase Postgres (free)"]
-        direction TB
-        geoAreas[("geo_areas<br/>dimension")]:::db
-        rollups[("geo_time_rollups<br/>5m + 1d fact")]:::db
-        behavior[("behavior_events<br/>canonical behavior fact")]:::db
-        rawBehavior[("analytics_private.behavior_events_raw<br/>exact · restricted · 30d")]:::db
-        sessions[("sessions · funnel_steps<br/>replay-safe projections")]:::db
-        alertTbl[("alert_rules · incidents")]:::db
-        legacyLogs[("visitor_logs · visitor_clicks<br/>legacy truth of result")]:::db
-    end
+| Concern | Design decision |
+|---|---|
+| Ingest | Browser events are versioned and published to Kafka through the Portfolio edge API |
+| Dedup | `event_id` is guarded by Redis/Valkey `SETNX`; database upserts are idempotent |
+| Enrichment | User agent, bot detection, referrer, geo bucket, and HMAC identity are derived server-side |
+| Read models | Public dashboards query precomputed rollups, not raw event tables |
+| Admin exactness | Admin visitor logs can inspect exact operational data; public web suppresses sensitive detail |
+| Alerts | Rules evaluate rollup windows and create durable incidents before notifying downstream services |
+| Recovery | Backfill replays legacy `visitor_logs` and failed Kafka events through the same enrichment pipeline |
 
-    %% =================== downstream (existing) ===================
-    notif(["portfolio-notification-service<br/>POST /api/content-events"]):::ext
+The service intentionally optimizes for low managed-service cost: two Kafka
+topics, compact rollup tables, and cold-start tolerant scheduled jobs.
 
-    %% ─────────── live ingest path ───────────
-    visitor --> sdk
-    sdk -- "versioned behavior events" --> ingest
-    ingest -- "produce JSON RawEvent" --> kraw
-    kraw --> consumer
-    consumer -- "parse + enrich" --> pipeline
-    pipeline -. "SETNX event_id (fail-open)" .-> dedupSvc
-    dedupSvc <--> redis
-    pipeline -- "EnrichedEvent" --> rollup
-    consumer -- "exact internal context" --> rawBehavior
-    consumer -- "sanitized event fact" --> behavior
-    consumer --> sessionizer
-    sessionizer --> sessions
-    rollup -- "INSERT ... ON CONFLICT" --> rollups
-    consumer -. "parse/missing field" .-> dlqProd
-    dlqProd --> kdlq
+---
 
-    %% ─────────── backfill path ───────────
-    backfill -- "SELECT *" --> legacyLogs
-    backfill -- "synthesize RawEvent<br/>eventId = vl:id / vc:id" --> pipeline
-
-    %% ─────────── read path (globe + /analytics) ───────────
-    publicApi -- "JOIN geo_areas" --> rollups
-    publicApi -- "lat/lng lookup" --> geoAreas
-    proxy -. "GET /api/public/visits/*" .-> publicApi
-    analyticsPage --> proxy
-    dash -- "'More →' link" --> analyticsPage
-    visitor --> dash
-
-    %% ─────────── alerts path ───────────
-    admin -- "CRUD rules + token" --> adminApi
-    adminApi --> alertTbl
-    evaluator -- "scan rollups vs rules" --> rollups
-    evaluator -- "open / close incidents" --> alertTbl
-    evaluator --> sender
-    sender -- "POST + X-Internal-Token" --> notif
-
-    classDef actor fill:#fef3c7,stroke:#b45309,color:#7c2d12
-    classDef ui fill:#dbeafe,stroke:#1d4ed8,color:#1e3a8a
-    classDef api fill:#e0e7ff,stroke:#4338ca,color:#312e81
-    classDef comp fill:#ecfdf5,stroke:#047857,color:#064e3b
-    classDef topic fill:#fce7f3,stroke:#be185d,color:#831843
-    classDef cache fill:#fef9c3,stroke:#a16207,color:#713f12
-    classDef db fill:#e0f2fe,stroke:#0369a1,color:#0c4a6e
-    classDef ext fill:#f1f5f9,stroke:#475569,color:#1e293b,stroke-dasharray: 4 3
-```
-
-> **Read this as a UML component diagram:** rounded boxes are actors,
-> stadium / cylinder shapes are external stores (Kafka topics, Redis,
-> Postgres tables), and rectangles inside the service subgraphs are
-> Spring components. Solid arrows are synchronous calls or Kafka
-> produce/consume; dashed arrows are best-effort side-channels
-> (dedup / DLQ / read proxy).
-
-### 1.2 ASCII overview
-
-```
-            Ingestion API                            Kafka
-   (Portfolio Next.js /api/track)   ───→    analytics.raw.events
-                                                     │
-                                                     ▼
-                                       ┌──────────────────────────────┐
-                                       │ analytics-aggregator-service │
-                                       │  ┌──────────────────────┐    │
-   Redis  ◀──────────  SETNX ─────────│  │  EnrichmentPipeline  │    │
-   (event_id dedup)                    │  │  UA · bot · ip_hash  │    │
-                                       │  │  GeoSnap → METRO     │    │
-                                       │  └──────────┬───────────┘    │
-                                       │             ▼                │
-                                       │  ┌──────────────────────┐    │
-                                       │  │ RollupUpsertService  │ ──→│──→ Supabase Postgres
-                                       │  │ (5m + 1d granularity)│    │     geo_time_rollups
-                                       │  └──────────────────────┘    │
-                                       │                              │
-                                       │  GET /api/public/visits/*    │
-                                       │  → globe + /analytics page   │
-                                       └──────────────────────────────┘
-                                                     │
-                                                     ▼
-                                            analytics.events.dlq
-                                            (poison-pill records)
-                                                     │
-                                                     ▼
-                                       ┌──────────────────────────────┐
-                                       │   analytics-alerts-service   │
-                                       │  rule eval @ 1 min cadence   │
-                                       │  HTTP → notification-service │
-                                       └──────────────────────────────┘
-```
-
-### Modules
+## Modules
 
 | Module | Port | Purpose |
 |---|---|---|
 | `analytics-common` | — | DTOs (`RawEvent`, `EnrichedEvent`, `GeoHint`), topic names, DLQ helper, `Outcome` enum (DONE / DLQ / RETRY) |
-| `analytics-aggregator-service` | 8093 | Single Kafka consumer that owns the full **raw → enrich → rollup** pipeline; also runs the backfill `CommandLineRunner` and exposes `/api/public/visits/*` for the globe |
+| `analytics-aggregator-service` | 8093 | Owns event enrichment plus the combined **Session Aggregator** for sessions, funnels, entry/exit, duration, 5m/1d rollups, the daily 03:15 retention job, replay backfill from `visitor_logs`, and public visit APIs |
 | `analytics-alerts-service` | 8094 | Protected rule and incident APIs, scheduled rollup evaluation, durable cooldown/dedup, and retried HTTP fan-out to `portfolio-notification-service` |
 
 ### Why only 2 topics
