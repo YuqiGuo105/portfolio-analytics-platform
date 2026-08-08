@@ -1,0 +1,60 @@
+{
+  "title": "Visitor Intelligence Subsystem",
+  "subtitle": "First-party capture · durable ingestion · effectively-once sessions · city-level insights · replayable alerts",
+  "summary": "CAPTURE PLANE · SESSION INTELLIGENCE · QUERY + ALERT PLANE",
+  "description": "Production visitor analytics flow with Kafka ingestion, durable deduplication, session and funnel aggregation, bounded read models, alert evaluation, DLQ isolation, and replay.",
+  "theme": "light",
+  "validateNoOverlap": true,
+  "width": 2360,
+  "height": 1050,
+  "lanes": [
+    { "id": "capture", "title": "01 · CAPTURE", "subtitle": "first-party envelope · request bounds · city geo-snap", "x": 140, "y": 115, "w": 600, "h": 600, "accent": "blue", "fillOpacity": 0.04, "strokeOpacity": 0.3 },
+    { "id": "stream", "title": "02 · DURABLE INGESTION", "subtitle": "Kafka partitioning · manual ACK · poison isolation", "x": 760, "y": 115, "w": 320, "h": 600, "accent": "purple", "fillOpacity": 0.04, "strokeOpacity": 0.3 },
+    { "id": "intelligence", "title": "03 · SESSION INTELLIGENCE", "subtitle": "enrich · deduplicate · sessionize · funnel · rollup", "x": 1100, "y": 115, "w": 560, "h": 600, "accent": "green", "fillOpacity": 0.04, "strokeOpacity": 0.3 },
+    { "id": "serve", "title": "04 · QUERY + ALERT", "subtitle": "bounded read models · versioned rules · incident delivery", "x": 1680, "y": 115, "w": 630, "h": 600, "accent": "cyan", "fillOpacity": 0.04, "strokeOpacity": 0.3 },
+    { "id": "recovery", "title": "05 · REPLAY + RECOVERY", "subtitle": "DLQ isolation · bounded range replay · idempotent rebuild", "x": 760, "y": 760, "w": 1550, "h": 210, "accent": "red", "fillOpacity": 0.03, "strokeOpacity": 0.28 }
+  ],
+  "nodes": [
+    { "id": "visitor", "shape": "actor", "icon": "user", "title": "Visitor", "meta": "WEB / MOBILE", "accent": "cyan", "x": 20, "y": 320, "w": 105, "h": 112 },
+    { "id": "web", "brand": "nextdotjs", "brandColor": "#111827", "icon": "web", "title": "Portfolio Event Client", "meta": "NEXT.JS · FIRST PARTY", "accent": "blue", "x": 180, "y": 250, "w": 240, "h": 220, "details": ["page · click · read progress", "engaged time · referrer", "session + anonymous identity"] },
+    { "id": "tracking", "brand": "springboot", "brandColor": "#6db33f", "icon": "api", "title": "Tracking API", "meta": "CLOUD RUN · HTTP 202", "accent": "cyan", "x": 460, "y": 250, "w": 240, "h": 220, "details": ["schema + payload bounds", "request ID + IP handling", "city-level geo-snap"] },
+    { "id": "raw-topic", "shape": "queue", "brand": "apachekafka", "brandColor": "#231f20", "icon": "queue", "title": "Visitor Ingestion", "meta": "ANALYTICS.RAW.EVENTS.V1", "metaBelow": true, "tubeHeight": 56, "accent": "purple", "x": 800, "y": 320, "w": 240, "h": 82 },
+    {
+      "id": "aggregator", "shape": "cluster", "brand": "springboot", "brandColor": "#6db33f", "icon": "chart",
+      "title": "Session Aggregator", "meta": "BATCH CONSUMER · MANUAL ACK", "accent": "green", "x": 1140, "y": 175, "w": 480, "h": 450,
+      "members": ["Event Enrichment", "Durable Dedup", "Session Boundaries", "Funnel Steps", "Intent Score", "5m + 1d Rollups"],
+      "resources": [
+        { "brand": "redis", "brandColor": "#d82c20", "icon": "cache", "title": "Hot Guards", "meta": "VALKEY · SETNX · TTL", "accent": "red", "weight": 0.85 },
+        { "brand": "postgresql", "brandColor": "#336791", "icon": "database", "title": "Analytics Store", "meta": "EVENTS · SESSIONS · ROLLUPS", "accent": "blue", "weight": 1.55 }
+      ]
+    },
+    { "id": "query", "brand": "springboot", "brandColor": "#6db33f", "icon": "chart", "title": "Analytics Query API", "meta": "PUBLIC + ADMIN READ MODELS", "accent": "cyan", "x": 1720, "y": 190, "w": 300, "h": 205, "details": ["summary · city markers", "sessions · funnels · intent", "ETag + bounded export"] },
+    { "id": "consumers", "shape": "actor", "icon": "monitor", "title": "Analytics Views", "meta": "PORTFOLIO / ADMIN", "accent": "blue", "x": 2160, "y": 210, "w": 140, "h": 112 },
+    {
+      "id": "alerts", "shape": "cluster", "brand": "springboot", "brandColor": "#6db33f", "icon": "bell",
+      "title": "Visitor Alert Evaluator", "meta": "RULE WINDOW · INCIDENT STATE", "accent": "orange", "x": 1720, "y": 450, "w": 300, "h": 240,
+      "members": ["Versioned Rules", "Window Evaluate", "Cooldown / Dedupe", "Incident Ledger"],
+      "resources": [{ "brand": "postgresql", "brandColor": "#336791", "icon": "database", "title": "Rules + Incidents", "meta": "DURABLE STATE", "accent": "blue" }]
+    },
+    { "id": "alert-topic", "shape": "queue", "brand": "apachekafka", "brandColor": "#231f20", "icon": "queue", "title": "Alert Dispatch", "meta": "ANALYTICS.ALERTS.V1", "metaBelow": true, "tubeHeight": 56, "accent": "purple", "x": 2050, "y": 455, "w": 250, "h": 82 },
+    { "id": "notification", "brand": "springboot", "brandColor": "#6db33f", "icon": "mail", "title": "Notification Handoff", "meta": "IDEMPOTENT ADMIN ALERT", "accent": "red", "x": 2050, "y": 570, "w": 250, "h": 105, "details": ["delivery owned downstream"] },
+    { "id": "dlq", "shape": "queue", "brand": "apachekafka", "brandColor": "#231f20", "icon": "queue", "title": "Visitor DLQ", "meta": "ANALYTICS.DLQ.V1", "metaBelow": true, "tubeHeight": 56, "accent": "red", "x": 805, "y": 815, "w": 240, "h": 82 },
+    { "id": "replay", "icon": "retry", "title": "Replay Controller", "meta": "BOUNDED RANGE · IDEMPOTENT", "accent": "red", "x": 1150, "y": 800, "w": 360, "h": 120, "details": ["rebuild sessions · funnels · intent · rollups", "visitor_logs is the canonical replay source"] },
+    { "id": "checkpoint", "shape": "database", "brand": "postgresql", "brandColor": "#336791", "icon": "database", "title": "Replay Checkpoint", "meta": "RANGE · CURSOR · OUTCOME", "accent": "blue", "x": 1740, "y": 805, "w": 330, "h": 115, "details": ["auditable recovery state"] }
+  ],
+  "edges": [
+    { "from": "visitor", "to": "web", "kind": "primary", "label": "browse", "routing": "smooth" },
+    { "from": "web", "to": "tracking", "kind": "primary", "label": "/api/track · /api/click", "routing": "smooth" },
+    { "from": "tracking", "to": "raw-topic", "kind": "event", "label": "RawEvent v1", "routing": "smooth" },
+    { "from": "raw-topic", "to": "aggregator", "kind": "event", "label": "batch · manual ACK", "routing": "smooth" },
+    { "from": "aggregator", "to": "query", "fromAt": { "x": 1620, "y": 280 }, "toAt": { "x": 1720, "y": 290 }, "kind": "data", "label": "read projections", "routing": "smooth" },
+    { "from": "query", "to": "consumers", "fromAt": { "x": 2020, "y": 275 }, "toAt": { "x": 2160, "y": 286 }, "kind": "primary", "label": "bounded response", "via": [{ "x": 2090, "y": 265 }], "routing": "smooth" },
+    { "from": "aggregator", "to": "alerts", "fromAt": { "x": 1620, "y": 500 }, "toAt": { "x": 1720, "y": 550 }, "kind": "data", "label": "rollup windows", "routing": "smooth" },
+    { "from": "alerts", "to": "alert-topic", "fromAt": { "x": 2020, "y": 525 }, "toAt": { "x": 2050, "y": 495 }, "kind": "event", "label": "incident intent", "routing": "smooth" },
+    { "from": "alert-topic", "to": "notification", "fromSide": "bottom", "toSide": "top", "kind": "event", "label": "fan-out", "via": [{ "x": 2210, "y": 540 }], "routing": "smooth" },
+    { "from": "raw-topic", "to": "dlq", "fromSide": "bottom", "toSide": "top", "kind": "recovery", "label": "invalid / poison", "via": [{ "x": 980, "y": 590 }], "routing": "smooth" },
+    { "from": "dlq", "to": "replay", "kind": "recovery", "label": "inspect + replay", "routing": "smooth" },
+    { "from": "replay", "to": "aggregator", "fromSide": "top", "toSide": "bottom", "kind": "recovery", "label": "rebuild range", "routing": "smooth" },
+    { "from": "replay", "to": "checkpoint", "kind": "data", "label": "checkpoint", "via": [{ "x": 1610, "y": 845 }], "routing": "smooth" }
+  ]
+}
