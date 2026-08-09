@@ -1,15 +1,18 @@
 package site.yuqi.analytics.alerts.operations;
 
-import com.fasterxml.jackson.core.JsonProcessingException;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.beans.factory.annotation.Value;
-import org.springframework.kafka.core.KafkaTemplate;
 import org.springframework.stereotype.Component;
 import site.yuqi.analytics.alerts.dto.AlertIncident;
 import site.yuqi.analytics.common.event.OperationEvent;
 
+import java.net.URI;
+import java.net.http.HttpClient;
+import java.net.http.HttpRequest;
+import java.net.http.HttpResponse;
+import java.time.Duration;
 import java.time.Instant;
 import java.util.Map;
 import java.util.UUID;
@@ -18,12 +21,16 @@ import java.util.UUID;
 @RequiredArgsConstructor
 @Slf4j
 public class OperationEventPublisher {
+    private static final HttpClient HTTP = HttpClient.newBuilder().build();
 
-    private final KafkaTemplate<String, String> kafka;
     private final ObjectMapper objectMapper;
 
-    @Value("${analytics.topics.operations:platform.operation.events.v1}")
-    private String topic;
+    @Value("${analytics.operations.ingest-url:}")
+    private String ingestUrl;
+    @Value("${analytics.operations.internal-token:}")
+    private String internalToken;
+    @Value("${analytics.operations.timeout-ms:750}")
+    private long timeoutMs;
 
     @Value("${spring.profiles.active:default}")
     private String environment;
@@ -53,22 +60,27 @@ public class OperationEventPublisher {
                         "ruleId", incident.ruleId(),
                         "siteId", incident.siteId(),
                         "granularity", incident.granularity()));
-        send(event, correlationId);
+        send(event);
         return eventId;
     }
 
-    private void send(OperationEvent event, String key) {
+    private void send(OperationEvent event) {
+        if (ingestUrl == null || ingestUrl.isBlank() || internalToken == null || internalToken.isBlank()) return;
         try {
-            kafka.send(topic, key, objectMapper.writeValueAsString(event))
-                    .whenComplete((ignored, error) -> {
-                        if (error != null) {
-                            log.warn("operation_event_publish_failed type={} eventId={}",
-                                    event.eventType(), event.eventId(), error);
-                        }
-                    });
-        } catch (JsonProcessingException error) {
-            log.warn("operation_event_serialize_failed type={} eventId={}",
-                    event.eventType(), event.eventId(), error);
+            HttpRequest request = HttpRequest.newBuilder(URI.create(ingestUrl))
+                    .timeout(Duration.ofMillis(timeoutMs))
+                    .header("Content-Type", "application/json")
+                    .header("X-Internal-Token", internalToken)
+                    .POST(HttpRequest.BodyPublishers.ofString(objectMapper.writeValueAsString(event)))
+                    .build();
+            HTTP.sendAsync(request, HttpResponse.BodyHandlers.discarding()).whenComplete((response, error) -> {
+                if (error != null || response.statusCode() >= 300) {
+                    log.warn("operation_event_ingest_failed type={} status={}", event.eventType(),
+                            error == null ? response.statusCode() : error.getClass().getSimpleName());
+                }
+            });
+        } catch (Exception error) {
+            log.warn("operation_event_ingest_failed type={} eventId={}", event.eventType(), event.eventId(), error);
         }
     }
 }
