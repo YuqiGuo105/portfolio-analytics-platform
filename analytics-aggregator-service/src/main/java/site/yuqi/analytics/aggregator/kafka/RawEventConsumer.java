@@ -7,6 +7,7 @@ import org.springframework.kafka.annotation.KafkaListener;
 import org.springframework.kafka.support.Acknowledgment;
 import org.springframework.stereotype.Component;
 import site.yuqi.analytics.aggregator.enrich.EnrichmentPipeline;
+import site.yuqi.analytics.aggregator.operations.OperationEventPublisher;
 import site.yuqi.analytics.aggregator.service.KafkaEventBatchProcessor;
 import site.yuqi.analytics.aggregator.service.RollupUpsertService;
 import site.yuqi.analytics.common.event.EnrichedEvent;
@@ -15,6 +16,7 @@ import site.yuqi.analytics.common.kafka.DlqProducer;
 import site.yuqi.analytics.common.kafka.Outcome;
 
 import java.util.ArrayList;
+import java.time.Instant;
 import java.util.List;
 
 /**
@@ -45,6 +47,7 @@ public class RawEventConsumer {
     private final KafkaEventBatchProcessor batchProcessor;
     private final RollupUpsertService rollup;
     private final DlqProducer dlq;
+    private final OperationEventPublisher operations;
 
     @KafkaListener(
             topics = "${analytics.topics.raw}",
@@ -90,6 +93,7 @@ public class RawEventConsumer {
             return;
         }
 
+        Instant startedAt = Instant.now();
         try {
             batchProcessor.process(candidates);
         } catch (RuntimeException dbErr) {
@@ -97,6 +101,7 @@ public class RawEventConsumer {
                     candidates.size(), dbErr.getMessage());
             throw dbErr;
         }
+        candidates.forEach(candidate -> operations.ingestionCompleted(candidate.enriched(), startedAt));
         // A replay after an ack/commit race is absorbed by analytics_kafka_inbox.
         ack.acknowledge();
     }

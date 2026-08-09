@@ -103,6 +103,7 @@ analytics:
   topics:
     raw: ${ANALYTICS_TOPIC_RAW:analytics.raw.events}
     dlq: ${ANALYTICS_TOPIC_DLQ:analytics.events.dlq}
+    operations: ${PLATFORM_OPERATIONS_TOPIC:platform.operation.events.v1}
   consumer-enabled: ${ANALYTICS_CONSUMER_ENABLED:true}
   # Fail-closed: no default. If ANALYTICS_HMAC_SALT is unset the app will
   # refuse to start (Spring can't resolve the placeholder) instead of

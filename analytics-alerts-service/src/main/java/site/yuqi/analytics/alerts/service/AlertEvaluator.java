@@ -10,6 +10,7 @@ import site.yuqi.analytics.alerts.dto.AlertIncident;
 import site.yuqi.analytics.alerts.dto.AlertRule;
 import site.yuqi.analytics.alerts.repo.AlertIncidentRepository;
 import site.yuqi.analytics.alerts.repo.AlertRuleRepository;
+import site.yuqi.analytics.alerts.operations.OperationEventPublisher;
 import site.yuqi.analytics.common.event.Granularity;
 
 import java.sql.Timestamp;
@@ -32,6 +33,7 @@ public class AlertEvaluator {
     private final JdbcTemplate jdbc;
     private final NotificationSender sender;
     private final AlertIncidentRepository incidents;
+    private final OperationEventPublisher operations;
 
     @Value("${analytics.alerts.enabled:true}")
     private boolean evalEnabled;
@@ -86,7 +88,10 @@ public class AlertEvaluator {
                 g.code(),
                 bucket.getEpochSecond());
 
-        incidents.insert(r, bucket, count, dedupKey).ifPresent(this::deliver);
+        incidents.insert(r, bucket, count, dedupKey).ifPresent(incident -> {
+            operations.publish(incident, "visitor.alert.triggered", "completed", 1);
+            deliver(incident);
+        });
     }
 
     private static Instant shiftBack(Instant newest, Granularity granularity, int buckets) {
@@ -106,28 +111,38 @@ public class AlertEvaluator {
     }
 
     private void deliver(AlertIncident incident) {
+        int attempt = incident.notificationAttempts() + 1;
+        String correlationId = "visitor-alert:" + incident.incidentId();
         String alertBody = "%s %s threshold %d (measured %d, bucket %s)".formatted(
                 incident.comparator(),
                 incident.ruleName(),
                 incident.threshold(),
                 incident.measuredValue(),
                 incident.bucketTime());
-        boolean ok = sender.send(Map.of(
-                "eventType", "ANALYTICS_ALERT_TRIGGERED",
-                "topic", "ADMIN_ALERTS",
-                "title", "Alert: " + incident.ruleName(),
-                "summary", alertBody,
-                "sourceType", "ALERT",
-                "sourceId", String.valueOf(incident.ruleId()),
-                "idempotencyKey", "incident:" + incident.incidentId(),
-                "metadata", Map.of(
+        boolean ok = sender.send(Map.ofEntries(
+                Map.entry("eventType", "ANALYTICS_ALERT_TRIGGERED"),
+                Map.entry("topic", "ADMIN_ALERTS"),
+                Map.entry("title", "Alert: " + incident.ruleName()),
+                Map.entry("summary", alertBody),
+                Map.entry("sourceType", "ALERT"),
+                Map.entry("sourceId", String.valueOf(incident.ruleId())),
+                Map.entry("schemaVersion", 1),
+                Map.entry("correlationId", correlationId),
+                Map.entry("causationId", "incident:" + incident.incidentId()),
+                Map.entry("idempotencyKey", "incident:" + incident.incidentId()),
+                Map.entry("metadata", Map.of(
                         "siteId", incident.siteId(),
                         "ruleId", incident.ruleId(),
                         "incidentId", incident.incidentId(),
                         "geoAreaId", incident.geoAreaId() == null ? "" : incident.geoAreaId(),
                         "measuredValue", incident.measuredValue(),
-                        "threshold", incident.threshold())));
+                        "threshold", incident.threshold()))));
         incidents.recordNotificationResult(incident.incidentId(), ok);
+        operations.publish(
+                incident,
+                ok ? "visitor.alert.notification_dispatched" : "visitor.alert.notification_failed",
+                ok ? "completed" : "failed",
+                attempt);
     }
 
     long countMatching(AlertRule r, Instant bucket) {

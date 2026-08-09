@@ -8,6 +8,7 @@ import site.yuqi.analytics.alerts.dto.AlertIncident;
 import site.yuqi.analytics.alerts.dto.AlertRule;
 import site.yuqi.analytics.alerts.repo.AlertIncidentRepository;
 import site.yuqi.analytics.alerts.repo.AlertRuleRepository;
+import site.yuqi.analytics.alerts.operations.OperationEventPublisher;
 
 import java.time.Instant;
 import java.util.List;
@@ -32,6 +33,7 @@ class AlertEvaluatorTest {
     private NotificationSender sender;
     private AlertIncidentRepository incidents;
     private AlertEvaluator eval;
+    private OperationEventPublisher operations;
 
     @BeforeEach
     void setUp() {
@@ -39,9 +41,10 @@ class AlertEvaluatorTest {
         jdbc = mock(JdbcTemplate.class);
         sender = mock(NotificationSender.class);
         incidents = mock(AlertIncidentRepository.class);
+        operations = mock(OperationEventPublisher.class);
         when(sender.send(anyMap())).thenReturn(true);
         when(incidents.existsWithinCooldown(any(), any())).thenReturn(false);
-        eval = new AlertEvaluator(repo, jdbc, sender, incidents);
+        eval = new AlertEvaluator(repo, jdbc, sender, incidents, operations);
     }
 
     @Test

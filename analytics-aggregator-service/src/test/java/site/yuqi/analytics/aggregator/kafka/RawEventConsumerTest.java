@@ -7,6 +7,7 @@ import org.springframework.kafka.support.Acknowledgment;
 import site.yuqi.analytics.aggregator.enrich.EnrichmentPipeline;
 import site.yuqi.analytics.aggregator.service.KafkaEventBatchProcessor;
 import site.yuqi.analytics.aggregator.service.RollupUpsertService;
+import site.yuqi.analytics.aggregator.operations.OperationEventPublisher;
 import site.yuqi.analytics.common.event.EnrichedEvent;
 import site.yuqi.analytics.common.event.EnrichedGeo;
 import site.yuqi.analytics.common.event.GeoHint;
@@ -45,6 +46,7 @@ class RawEventConsumerTest {
     private KafkaEventBatchProcessor batchProcessor;
     private DlqProducer dlq;
     private RawEventConsumer consumer;
+    private OperationEventPublisher operations;
 
     @BeforeEach
     void setUp() {
@@ -52,7 +54,8 @@ class RawEventConsumerTest {
         rollup = mock(RollupUpsertService.class);
         batchProcessor = mock(KafkaEventBatchProcessor.class);
         dlq = mock(DlqProducer.class);
-        consumer = new RawEventConsumer(pipeline, batchProcessor, rollup, dlq);
+        operations = mock(OperationEventPublisher.class);
+        consumer = new RawEventConsumer(pipeline, batchProcessor, rollup, dlq, operations);
     }
 
     @Test
