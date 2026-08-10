@@ -3,7 +3,7 @@ package site.yuqi.analytics.aggregator.service;
 import com.fasterxml.jackson.core.JsonProcessingException;
 import com.fasterxml.jackson.core.type.TypeReference;
 import com.fasterxml.jackson.databind.ObjectMapper;
-import lombok.RequiredArgsConstructor;
+import org.springframework.beans.factory.annotation.Value;
 import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.stereotype.Service;
 
@@ -11,12 +11,15 @@ import java.sql.Timestamp;
 import java.time.Instant;
 import java.util.ArrayList;
 import java.util.Collections;
+import java.util.Comparator;
+import java.util.LinkedHashMap;
+import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Map;
+import java.util.Set;
 
 /** Read model for deterministic visitor journeys and intent scores. */
 @Service
-@RequiredArgsConstructor
 public class VisitorIntelligenceService {
 
     private static final String PUBLIC_PATH_CONDITION =
@@ -24,6 +27,16 @@ public class VisitorIntelligenceService {
 
     private final JdbcTemplate jdbc;
     private final ObjectMapper mapper;
+    private final int maxJourneySteps;
+
+    public VisitorIntelligenceService(
+            JdbcTemplate jdbc,
+            ObjectMapper mapper,
+            @Value("${analytics.intent.journey.max-steps:24}") int maxJourneySteps) {
+        this.jdbc = jdbc;
+        this.mapper = mapper;
+        this.maxJourneySteps = Math.max(1, maxJourneySteps);
+    }
 
     public VisitorIntelligenceOverview overview(
             String siteId, Instant from, Instant to, boolean includeAdmin, String excludedPathPrefix) {
@@ -336,31 +349,68 @@ public class VisitorIntelligenceService {
                 siteId, Timestamp.from(from), Timestamp.from(to),
                 includeAdmin, excludedLike, limit);
 
-        List<JourneySummary> results = new ArrayList<>(rows.size());
-        for (JourneyRow row : rows) {
-            List<JourneyStep> steps = new ArrayList<>(jdbc.query("""
-                            select event_id, event_name, event_time, page_path, target_path,
-                                   content_id, content_type, engaged_seconds, progress_percent
-                              from public.visitor_journey_steps
-                             where site_id = ? and session_id = ?
-                             order by event_time desc, event_id desc
-                             limit 8
-                            """,
-                    (rs, rowNum) -> new JourneyStep(
-                            rs.getString("event_id"),
-                            rs.getString("event_name"),
-                            rs.getTimestamp("event_time").toInstant(),
-                            rs.getString("page_path"),
-                            rs.getString("target_path"),
-                            rs.getString("content_id"),
-                            rs.getString("content_type"),
-                            nullableInteger(rs.getObject("engaged_seconds")),
-                            nullableInteger(rs.getObject("progress_percent"))),
-                    siteId, row.sessionId()));
-            Collections.reverse(steps);
-            results.add(row.withSteps(steps));
+        Map<String, List<JourneyStep>> stepsBySession = loadJourneySteps(siteId, rows);
+        return rows.stream()
+                .map(row -> row.withSteps(stepsBySession.getOrDefault(row.sessionId(), List.of())))
+                .toList();
+    }
+
+    /**
+     * Loads bounded event histories for all visible sessions in one query. The window function
+     * keeps the response bounded per session while avoiding one database round-trip per journey.
+     */
+    private Map<String, List<JourneyStep>> loadJourneySteps(
+            String siteId, List<JourneyRow> rows) {
+        if (rows.isEmpty()) return Map.of();
+
+        Set<String> sessionIds = new LinkedHashSet<>();
+        for (JourneyRow row : rows) sessionIds.add(row.sessionId());
+        String placeholders = String.join(", ", Collections.nCopies(sessionIds.size(), "?"));
+        String query = """
+                select session_id, event_id, event_name, event_time, page_path, target_path,
+                       content_id, content_type, engaged_seconds, progress_percent
+                  from (
+                    select j.*,
+                           row_number() over (
+                             partition by j.session_id
+                             order by j.event_time desc, j.event_id desc
+                           ) as journey_step_rank
+                      from public.visitor_journey_steps j
+                     where j.site_id = ? and j.session_id in (%s)
+                  ) ranked
+                 where journey_step_rank <= ?
+                 order by session_id, event_time, event_id
+                """.formatted(placeholders);
+
+        List<Object> arguments = new ArrayList<>(sessionIds.size() + 2);
+        arguments.add(siteId);
+        arguments.addAll(sessionIds);
+        arguments.add(maxJourneySteps);
+
+        List<SessionJourneyStep> steps = jdbc.query(
+                query,
+                (rs, rowNum) -> new SessionJourneyStep(
+                        rs.getString("session_id"),
+                        new JourneyStep(
+                                rs.getString("event_id"),
+                                rs.getString("event_name"),
+                                rs.getTimestamp("event_time").toInstant(),
+                                rs.getString("page_path"),
+                                rs.getString("target_path"),
+                                rs.getString("content_id"),
+                                rs.getString("content_type"),
+                                nullableInteger(rs.getObject("engaged_seconds")),
+                                nullableInteger(rs.getObject("progress_percent")))),
+                arguments.toArray());
+
+        Map<String, List<JourneyStep>> grouped = new LinkedHashMap<>();
+        for (SessionJourneyStep value : steps) {
+            grouped.computeIfAbsent(value.sessionId(), ignored -> new ArrayList<>())
+                    .add(value.step());
         }
-        return results;
+        grouped.values().forEach(values -> values.sort(
+                Comparator.comparing(JourneyStep::eventTime).thenComparing(JourneyStep::eventId)));
+        return grouped;
     }
 
     private Map<String, Integer> map(String json) {
@@ -473,6 +523,8 @@ public class VisitorIntelligenceService {
             String contentType,
             Integer engagedSeconds,
             Integer progressPercent) {}
+
+    private record SessionJourneyStep(String sessionId, JourneyStep step) {}
 
     private record JourneyRow(
             String sessionId,

@@ -24,7 +24,7 @@ class VisitorIntelligenceServiceTest {
     void buildsCompleteOverviewFromDeterministicReadModels() {
         StubJdbcTemplate jdbc = new StubJdbcTemplate();
         VisitorIntelligenceService service =
-                new VisitorIntelligenceService(jdbc, new ObjectMapper());
+                new VisitorIntelligenceService(jdbc, new ObjectMapper(), 24);
 
         VisitorIntelligenceService.VisitorIntelligenceOverview result = service.overview(
                 "yuqi.site",
@@ -52,6 +52,7 @@ class VisitorIntelligenceServiceTest {
                             .containsExactly("page_view", "read_progress");
                 });
         assertThat(result.recentJourneys()).hasSize(1);
+        assertThat(jdbc.journeyStepQueries).isEqualTo(2);
         assertThat(jdbc.journeyQueries)
                 .anySatisfy(sql -> assertThat(sql)
                         .contains("and i.intent_level in ('HIGH', 'MEDIUM')\n")
@@ -62,6 +63,7 @@ class VisitorIntelligenceServiceTest {
     private static final class StubJdbcTemplate extends JdbcTemplate {
 
         private final List<String> journeyQueries = new ArrayList<>();
+        private int journeyStepQueries;
 
         @Override
         public <T> T queryForObject(String sql, RowMapper<T> mapper, Object... args) {
@@ -147,10 +149,12 @@ class VisitorIntelligenceServiceTest {
                         Map.entry("contributing_signals", "[{\"signalKey\":\"resume\",\"score\":60}]")))));
             }
             if (sql.contains("from public.visitor_journey_steps")
-                    && sql.contains("order by event_time desc")) {
+                    && sql.contains("journey_step_rank")) {
+                journeyStepQueries++;
                 return List.of(
                         mapped(mapper, row(Map.ofEntries(
                                 Map.entry("event_id", "event-2"),
+                                Map.entry("session_id", "session-1"),
                                 Map.entry("event_name", "read_progress"),
                                 Map.entry("event_time", Timestamp.from(Instant.parse("2026-07-02T10:02:00Z"))),
                                 Map.entry("page_path", "/work-single/project-1"),
@@ -161,6 +165,7 @@ class VisitorIntelligenceServiceTest {
                                 Map.entry("progress_percent", 75)))),
                         mapped(mapper, row(Map.ofEntries(
                                 Map.entry("event_id", "event-1"),
+                                Map.entry("session_id", "session-1"),
                                 Map.entry("event_name", "page_view"),
                                 Map.entry("event_time", Timestamp.from(Instant.parse("2026-07-02T10:00:00Z"))),
                                 Map.entry("page_path", "/"),
