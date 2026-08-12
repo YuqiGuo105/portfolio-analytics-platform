@@ -22,6 +22,10 @@ import java.util.Map;
 public class VisitorQueryService {
 
     private static final TypeReference<Map<String, Object>> MAP_TYPE = new TypeReference<>() {};
+    private static final String LOOPBACK_URL_PATTERN =
+            "^(https?://|//)?(localhost|([a-z0-9-]+\\.)+localhost|127(\\.[0-9]{1,3}){3}|\\[?::1\\]?)(:[0-9]+)?([/?#]|$)";
+    private static final String LOOPBACK_IP_PATTERN =
+            "^(127(\\.[0-9]{1,3}){3}|::1|0:0:0:0:0:0:0:1)$";
 
     private final NamedParameterJdbcTemplate jdbc;
     private final ObjectMapper mapper;
@@ -72,7 +76,18 @@ public class VisitorQueryService {
         MapSqlParameterSource params = new MapSqlParameterSource()
                 .addValue("siteId", query.siteId())
                 .addValue("from", Timestamp.from(query.from()))
-                .addValue("to", Timestamp.from(query.to()));
+                .addValue("to", Timestamp.from(query.to()))
+                .addValue("loopbackUrlPattern", LOOPBACK_URL_PATTERN)
+                .addValue("loopbackIpPattern", LOOPBACK_IP_PATTERN);
+
+        sql.append("""
+                 and not (
+                     coalesce(r.page_url, '') ~* :loopbackUrlPattern
+                     or coalesce(r.target_url, '') ~* :loopbackUrlPattern
+                     or coalesce(r.referrer, '') ~* :loopbackUrlPattern
+                     or coalesce(r.ip_address, '') ~* :loopbackIpPattern
+                 )
+                """);
 
         addExact(sql, params, "event", "r.event_name", query.event());
         addContains(sql, params, "path", "coalesce(r.page_url, '') || ' ' || coalesce(r.target_url, '')", query.path());

@@ -77,12 +77,20 @@ class VisitorQueryServiceTest {
 
         assertThat(sql.getValue()).doesNotContain(untrusted).contains(
                 ":query", ":path", "nullif(b.page_path, '')", "regexp_replace(coalesce(r.page_url, '')",
+                "coalesce(r.page_url, '') ~* :loopbackUrlPattern",
+                "coalesce(r.target_url, '') ~* :loopbackUrlPattern",
+                "coalesce(r.referrer, '') ~* :loopbackUrlPattern",
+                "coalesce(r.ip_address, '') ~* :loopbackIpPattern",
                 ":excludedPathRoot",
                 ":excludedPathChildren", "limit :limit offset :offset");
         assertThat(params.getValue().getValue("query")).isEqualTo("%x\\%' or 1=1 --%");
         assertThat(params.getValue().getValue("path")).isEqualTo("%/blog\\_100\\%%");
         assertThat(params.getValue().getValue("excludedPathRoot")).isEqualTo("/admin");
         assertThat(params.getValue().getValue("excludedPathChildren")).isEqualTo("/admin/%");
+        assertThat(params.getValue().getValue("loopbackUrlPattern").toString())
+                .contains("localhost", "127", "::1");
+        assertThat(params.getValue().getValue("loopbackIpPattern").toString())
+                .contains("127", "::1");
         assertThat(params.getValue().getValue("limit")).isEqualTo(50);
         assertThat(params.getValue().getValue("offset")).isEqualTo(0L);
     }
