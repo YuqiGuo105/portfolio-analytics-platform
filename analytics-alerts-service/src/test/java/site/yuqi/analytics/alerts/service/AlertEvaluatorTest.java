@@ -6,6 +6,7 @@ import org.mockito.ArgumentCaptor;
 import org.springframework.jdbc.core.JdbcTemplate;
 import site.yuqi.analytics.alerts.dto.AlertIncident;
 import site.yuqi.analytics.alerts.dto.AlertRule;
+import site.yuqi.analytics.alerts.dto.NotificationDeliveryState;
 import site.yuqi.analytics.alerts.repo.AlertIncidentRepository;
 import site.yuqi.analytics.alerts.repo.AlertRuleRepository;
 import site.yuqi.analytics.alerts.operations.OperationEventPublisher;
@@ -64,6 +65,8 @@ class AlertEvaluatorTest {
         AlertIncident incident = sampleIncident();
         stubCount(250L);
         when(incidents.insert(eq(rule), any(), eq(250L), anyString())).thenReturn(Optional.of(incident));
+        when(incidents.claimNotification(eq(incident.incidentId()), any(), anyLong()))
+                .thenReturn(Optional.of(claimedIncident()));
 
         eval.evaluate(rule);
 
@@ -72,7 +75,8 @@ class AlertEvaluatorTest {
         assertThat(payload.getValue())
                 .containsEntry("eventType", "ANALYTICS_ALERT_TRIGGERED")
                 .containsEntry("topic", "ADMIN_ALERTS");
-        verify(incidents).recordNotificationResult(incident.incidentId(), true);
+        verify(incidents).recordNotificationResult(
+                eq(incident.incidentId()), eq(true), any(), anyLong(), anyInt(), eq(null));
     }
 
     @Test
@@ -92,12 +96,15 @@ class AlertEvaluatorTest {
         AlertIncident incident = sampleIncident();
         stubCount(250L);
         when(incidents.insert(eq(rule), any(), eq(250L), anyString())).thenReturn(Optional.of(incident));
+        when(incidents.claimNotification(eq(incident.incidentId()), any(), anyLong()))
+                .thenReturn(Optional.of(claimedIncident()));
         when(sender.send(anyMap())).thenReturn(false);
 
         eval.evaluate(rule);
 
         verify(sender).send(anyMap());
-        verify(incidents).recordNotificationResult(incident.incidentId(), false);
+        verify(incidents).recordNotificationResult(
+                eq(incident.incidentId()), eq(false), any(), anyLong(), anyInt(), anyString());
     }
 
     @Test
@@ -115,12 +122,14 @@ class AlertEvaluatorTest {
     @Test
     void pendingNotificationIsRetriedAndRecorded() {
         AlertIncident incident = sampleIncident();
-        when(incidents.findPendingNotifications(any(), anyInt())).thenReturn(List.of(incident));
+        when(incidents.claimPendingNotifications(any(), anyInt(), anyLong()))
+                .thenReturn(List.of(claimedIncident()));
 
         eval.retryPendingNotifications();
 
         verify(sender).send(anyMap());
-        verify(incidents).recordNotificationResult(incident.incidentId(), true);
+        verify(incidents).recordNotificationResult(
+                eq(incident.incidentId()), eq(true), any(), anyLong(), anyInt(), eq(null));
     }
 
     @Test
@@ -145,6 +154,17 @@ class AlertEvaluatorTest {
         Instant now = Instant.now();
         return new AlertIncident(
                 9L, 42L, "spike", "yuqi.site", null, now, "5m",
-                250L, 100L, ">=", false, null, 0, null, now);
+                250L, 100L, ">=", false, null, 0, null,
+                NotificationDeliveryState.PENDING, null, now, null, now);
+    }
+
+    private static AlertIncident claimedIncident() {
+        AlertIncident incident = sampleIncident();
+        return new AlertIncident(
+                incident.incidentId(), incident.ruleId(), incident.ruleName(), incident.siteId(),
+                incident.geoAreaId(), incident.bucketTime(), incident.granularity(),
+                incident.measuredValue(), incident.threshold(), incident.comparator(),
+                false, null, 1, Instant.now(), NotificationDeliveryState.DELIVERING,
+                Instant.now().plusSeconds(120), Instant.now(), null, incident.createdAt());
     }
 }

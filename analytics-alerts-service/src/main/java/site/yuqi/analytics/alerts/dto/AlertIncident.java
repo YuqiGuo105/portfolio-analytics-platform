@@ -17,5 +17,9 @@ public record AlertIncident(
         Instant notifiedAt,
         int notificationAttempts,
         Instant lastNotificationAttemptAt,
+        NotificationDeliveryState notificationState,
+        Instant notificationLeaseUntil,
+        Instant nextNotificationAttemptAt,
+        String lastNotificationError,
         Instant createdAt
 ) {}

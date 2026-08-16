@@ -8,6 +8,7 @@ import site.yuqi.analytics.alerts.dto.AlertIncident;
 import site.yuqi.analytics.alerts.dto.AlertIncidentPage;
 import site.yuqi.analytics.alerts.dto.AlertIncidentSummary;
 import site.yuqi.analytics.alerts.dto.AlertRule;
+import site.yuqi.analytics.alerts.dto.NotificationDeliveryState;
 
 import java.sql.Timestamp;
 import java.time.Instant;
@@ -25,7 +26,9 @@ public class AlertIncidentRepository {
             select i.incident_id, i.rule_id, r.name as rule_name, i.site_id,
                    i.geo_area_id, i.bucket_time, i.granularity, i.measured_value,
                    i.threshold, i.comparator, i.notified, i.notified_at,
-                   i.notification_attempts, i.last_notification_attempt_at, i.created_at
+                   i.notification_attempts, i.last_notification_attempt_at,
+                   i.notification_state, i.notification_lease_until,
+                   i.next_notification_attempt_at, i.last_notification_error, i.created_at
             from incidents i
             join alert_rules r on r.rule_id = i.rule_id
             """;
@@ -45,6 +48,10 @@ public class AlertIncidentRepository {
             timestamp(rs.getTimestamp("notified_at")),
             rs.getInt("notification_attempts"),
             timestamp(rs.getTimestamp("last_notification_attempt_at")),
+            NotificationDeliveryState.valueOf(rs.getString("notification_state")),
+            timestamp(rs.getTimestamp("notification_lease_until")),
+            timestamp(rs.getTimestamp("next_notification_attempt_at")),
+            rs.getString("last_notification_error"),
             rs.getTimestamp("created_at").toInstant());
 
     public boolean existsWithinCooldown(AlertRule rule, Instant since) {
@@ -76,24 +83,87 @@ public class AlertIncidentRepository {
         return jdbc.query(SELECT + " where i.dedup_key = ?", MAPPER, dedupKey).stream().findFirst();
     }
 
-    public List<AlertIncident> findPendingNotifications(Instant retryBefore, int limit) {
-        return jdbc.query(SELECT + """
-                where i.notified = false
-                  and (i.last_notification_attempt_at is null or i.last_notification_attempt_at <= ?)
+    public List<AlertIncident> claimPendingNotifications(Instant now, int limit, long leaseSeconds) {
+        return jdbc.query("""
+                with candidates as (
+                    select incident_id
+                    from incidents
+                    where notified = false
+                      and next_notification_attempt_at <= ?
+                      and (
+                        notification_state in ('PENDING', 'RETRY_WAIT')
+                        or (notification_state = 'DELIVERING' and notification_lease_until <= ?)
+                      )
+                    order by created_at
+                    for update skip locked
+                    limit ?
+                ), claimed as (
+                    update incidents i
+                    set notification_state = 'DELIVERING',
+                        notification_lease_until = ? + (? * interval '1 second'),
+                        notification_attempts = notification_attempts + 1,
+                        last_notification_attempt_at = ?
+                    from candidates c
+                    where i.incident_id = c.incident_id
+                    returning i.*
+                )
+                select i.incident_id, i.rule_id, r.name as rule_name, i.site_id,
+                       i.geo_area_id, i.bucket_time, i.granularity, i.measured_value,
+                       i.threshold, i.comparator, i.notified, i.notified_at,
+                       i.notification_attempts, i.last_notification_attempt_at,
+                       i.notification_state, i.notification_lease_until,
+                       i.next_notification_attempt_at, i.last_notification_error, i.created_at
+                from claimed i
+                join alert_rules r on r.rule_id = i.rule_id
                 order by i.created_at
-                limit ?
-                """, MAPPER, Timestamp.from(retryBefore), limit);
+                """, MAPPER, Timestamp.from(now), Timestamp.from(now), limit,
+                Timestamp.from(now), Math.max(1, leaseSeconds), Timestamp.from(now));
     }
 
-    public void recordNotificationResult(long incidentId, boolean notified) {
+    public Optional<AlertIncident> claimNotification(long incidentId, Instant now, long leaseSeconds) {
+        int claimed = jdbc.update("""
+                update incidents
+                set notification_state = 'DELIVERING',
+                    notification_lease_until = ? + (? * interval '1 second'),
+                    notification_attempts = notification_attempts + 1,
+                    last_notification_attempt_at = ?
+                where incident_id = ?
+                  and notified = false
+                  and notification_state in ('PENDING', 'RETRY_WAIT')
+                """, Timestamp.from(now), Math.max(1, leaseSeconds), Timestamp.from(now), incidentId);
+        if (claimed == 0) {
+            return Optional.empty();
+        }
+        return jdbc.query(SELECT + " where i.incident_id = ?", MAPPER, incidentId).stream().findFirst();
+    }
+
+    public void recordNotificationResult(
+            long incidentId,
+            boolean delivered,
+            Instant now,
+            long retrySeconds,
+            int maxAttempts,
+            String error) {
         jdbc.update("""
                 update incidents
-                set notification_attempts = notification_attempts + 1,
-                    last_notification_attempt_at = now(),
+                set notification_state = case
+                        when ? then 'DELIVERED'
+                        when notification_attempts >= ? then 'DEAD_LETTER'
+                        else 'RETRY_WAIT'
+                    end,
+                    notification_lease_until = null,
+                    next_notification_attempt_at = case
+                        when ? then next_notification_attempt_at
+                        else ? + (? * interval '1 second')
+                    end,
+                    last_notification_error = case when ? then null else ? end,
                     notified = case when ? then true else notified end,
-                    notified_at = case when ? then now() else notified_at end
+                    notified_at = case when ? then ? else notified_at end
                 where incident_id = ?
-                """, notified, notified, incidentId);
+                  and notification_state = 'DELIVERING'
+                """, delivered, Math.max(1, maxAttempts), delivered,
+                Timestamp.from(now), Math.max(1, retrySeconds), delivered, error,
+                delivered, delivered, Timestamp.from(now), incidentId);
     }
 
     public AlertIncidentPage findRecent(

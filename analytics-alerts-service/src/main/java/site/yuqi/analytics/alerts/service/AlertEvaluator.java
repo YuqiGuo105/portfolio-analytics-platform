@@ -44,6 +44,12 @@ public class AlertEvaluator {
     @Value("${analytics.alerts.notification-retry-batch-size:25}")
     private int notificationRetryBatchSize;
 
+    @Value("${analytics.alerts.notification-lease-seconds:120}")
+    private long notificationLeaseSeconds;
+
+    @Value("${analytics.alerts.notification-max-attempts:8}")
+    private int notificationMaxAttempts;
+
     @Value("${analytics.alerts.lookback-buckets:2}")
     private int lookbackBuckets;
 
@@ -90,7 +96,8 @@ public class AlertEvaluator {
 
         incidents.insert(r, bucket, count, dedupKey).ifPresent(incident -> {
             operations.publish(incident, "visitor.alert.triggered", "completed", 1);
-            deliver(incident);
+            incidents.claimNotification(incident.incidentId(), Instant.now(), notificationLeaseSeconds)
+                    .ifPresent(this::deliver);
         });
     }
 
@@ -102,16 +109,16 @@ public class AlertEvaluator {
     }
 
     void retryPendingNotifications() {
-        long retrySeconds = Math.max(1, notificationRetrySeconds);
         int batchSize = Math.max(1, notificationRetryBatchSize);
-        Instant retryBefore = Instant.now().minus(Duration.ofSeconds(retrySeconds));
-        for (AlertIncident incident : incidents.findPendingNotifications(retryBefore, batchSize)) {
+        Instant now = Instant.now();
+        for (AlertIncident incident : incidents.claimPendingNotifications(
+                now, batchSize, Math.max(1, notificationLeaseSeconds))) {
             deliver(incident);
         }
     }
 
     private void deliver(AlertIncident incident) {
-        int attempt = incident.notificationAttempts() + 1;
+        int attempt = incident.notificationAttempts();
         String correlationId = "visitor-alert:" + incident.incidentId();
         String alertBody = "%s %s threshold %d (measured %d, bucket %s)".formatted(
                 incident.comparator(),
@@ -137,7 +144,13 @@ public class AlertEvaluator {
                         "geoAreaId", incident.geoAreaId() == null ? "" : incident.geoAreaId(),
                         "measuredValue", incident.measuredValue(),
                         "threshold", incident.threshold()))));
-        incidents.recordNotificationResult(incident.incidentId(), ok);
+        incidents.recordNotificationResult(
+                incident.incidentId(),
+                ok,
+                Instant.now(),
+                Math.max(1, notificationRetrySeconds),
+                Math.max(1, notificationMaxAttempts),
+                ok ? null : "Notification service rejected delivery");
         operations.publish(
                 incident,
                 ok ? "visitor.alert.notification_dispatched" : "visitor.alert.notification_failed",

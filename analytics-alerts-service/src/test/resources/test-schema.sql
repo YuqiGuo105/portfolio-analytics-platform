@@ -50,5 +50,9 @@ create table incidents (
     notified_at timestamp,
     notification_attempts integer not null default 0,
     last_notification_attempt_at timestamp,
+    notification_state varchar(32) not null default 'PENDING',
+    notification_lease_until timestamp,
+    next_notification_attempt_at timestamp not null default current_timestamp,
+    last_notification_error varchar(1024),
     created_at timestamp not null default current_timestamp
 );
