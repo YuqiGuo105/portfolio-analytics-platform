@@ -4,6 +4,7 @@ import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.mockito.ArgumentCaptor;
 import org.springframework.jdbc.core.JdbcTemplate;
+import org.springframework.test.util.ReflectionTestUtils;
 import site.yuqi.analytics.alerts.dto.AlertIncident;
 import site.yuqi.analytics.alerts.dto.AlertRule;
 import site.yuqi.analytics.alerts.dto.NotificationDeliveryState;
@@ -16,6 +17,7 @@ import java.util.List;
 import java.util.Optional;
 
 import static org.assertj.core.api.Assertions.assertThat;
+import static org.assertj.core.api.Assertions.assertThatCode;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyInt;
 import static org.mockito.ArgumentMatchers.anyLong;
@@ -45,6 +47,8 @@ class AlertEvaluatorTest {
         operations = mock(OperationEventPublisher.class);
         when(sender.send(anyMap())).thenReturn(true);
         when(incidents.existsWithinCooldown(any(), any())).thenReturn(false);
+        when(incidents.recordNotificationResult(anyLong(), anyInt(), any(Boolean.class),
+                any(), anyLong(), anyInt(), any())).thenReturn(true);
         eval = new AlertEvaluator(repo, jdbc, sender, incidents, operations);
     }
 
@@ -76,7 +80,7 @@ class AlertEvaluatorTest {
                 .containsEntry("eventType", "ANALYTICS_ALERT_TRIGGERED")
                 .containsEntry("topic", "ADMIN_ALERTS");
         verify(incidents).recordNotificationResult(
-                eq(incident.incidentId()), eq(true), any(), anyLong(), anyInt(), eq(null));
+                eq(incident.incidentId()), anyInt(), eq(true), any(), anyLong(), anyInt(), eq(null));
     }
 
     @Test
@@ -104,7 +108,7 @@ class AlertEvaluatorTest {
 
         verify(sender).send(anyMap());
         verify(incidents).recordNotificationResult(
-                eq(incident.incidentId()), eq(false), any(), anyLong(), anyInt(), anyString());
+                eq(incident.incidentId()), anyInt(), eq(false), any(), anyLong(), anyInt(), anyString());
     }
 
     @Test
@@ -129,7 +133,7 @@ class AlertEvaluatorTest {
 
         verify(sender).send(anyMap());
         verify(incidents).recordNotificationResult(
-                eq(incident.incidentId()), eq(true), any(), anyLong(), anyInt(), eq(null));
+                eq(incident.incidentId()), anyInt(), eq(true), any(), anyLong(), anyInt(), eq(null));
     }
 
     @Test
@@ -138,6 +142,18 @@ class AlertEvaluatorTest {
         assertThat(AlertEvaluator.fires(9, 10, ">=")).isFalse();
         assertThat(AlertEvaluator.fires(5, 10, "<=")).isTrue();
         assertThat(AlertEvaluator.fires(11, 10, "<=")).isFalse();
+    }
+
+    @Test
+    void invalidCompiledRuleIsIsolatedFromScheduledEvaluation() {
+        ReflectionTestUtils.setField(eval, "evalEnabled", true);
+        when(repo.findEnabled()).thenReturn(List.of(sampleRule(100, "unsupported")));
+        when(incidents.claimPendingNotifications(any(), anyInt(), anyLong())).thenReturn(List.of());
+
+        assertThatCode(eval::tick).doesNotThrowAnyException();
+
+        verify(jdbc, never()).query(anyString(), any(org.springframework.jdbc.core.RowCallbackHandler.class),
+                any(Object[].class));
     }
 
     private void stubCount(long value) {

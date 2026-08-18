@@ -4,6 +4,7 @@ import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.jdbc.core.JdbcTemplate;
+import org.springframework.jdbc.core.RowCallbackHandler;
 import org.springframework.scheduling.annotation.Scheduled;
 import org.springframework.stereotype.Service;
 import site.yuqi.analytics.alerts.dto.AlertIncident;
@@ -17,6 +18,12 @@ import java.sql.Timestamp;
 import java.time.Duration;
 import java.time.Instant;
 import java.util.Map;
+import java.util.ArrayList;
+import java.util.HashMap;
+import java.util.HashSet;
+import java.util.List;
+import java.util.Set;
+import java.util.stream.Collectors;
 
 /**
  * Evaluates every enabled alert rule once per minute against the
@@ -59,11 +66,44 @@ public class AlertEvaluator {
             return;
         }
         retryPendingNotifications();
-        for (AlertRule r : rules.findEnabled()) {
+        Map<String, List<AlertRule>> byGranularity = new HashMap<>();
+        for (AlertRule rule : rules.findEnabled()) {
             try {
-                evaluate(r);
+                compile(rule);
+                byGranularity.computeIfAbsent(rule.granularity(), ignored -> new ArrayList<>()).add(rule);
+            } catch (IllegalArgumentException e) {
+                log.warn("{\"event\":\"rule_compile_failed\",\"ruleId\":{},\"version\":{},\"err\":\"{}\"}",
+                        rule.ruleId(), rule.version(), e.getMessage());
+            }
+        }
+        for (Map.Entry<String, List<AlertRule>> entry : byGranularity.entrySet()) {
+            try {
+                evaluateBatch(entry.getValue());
             } catch (RuntimeException e) {
-                log.warn("{\"event\":\"rule_eval_failed\",\"ruleId\":{},\"err\":\"{}\"}", r.ruleId(), e.getMessage());
+                log.warn("{\"event\":\"rule_batch_eval_failed\",\"granularity\":\"{}\",\"rules\":{},\"err\":\"{}\"}",
+                        entry.getKey(), entry.getValue().size(), e.getMessage());
+            }
+        }
+    }
+
+    void evaluateBatch(List<AlertRule> candidates) {
+        if (candidates.isEmpty()) return;
+        Granularity granularity = "1d".equals(candidates.getFirst().granularity())
+                ? Granularity.ONE_DAY : Granularity.FIVE_MIN;
+        Instant newest = granularity.floor(Instant.now());
+        Set<Long> pending = candidates.stream().map(AlertRule::ruleId).collect(Collectors.toCollection(HashSet::new));
+        Map<Long, AlertRule> byId = candidates.stream().collect(Collectors.toMap(AlertRule::ruleId, rule -> rule));
+        for (int i = 0; i < Math.max(1, lookbackBuckets) && !pending.isEmpty(); i++) {
+            Instant bucket = shiftBack(newest, granularity, i);
+            Map<Long, Long> measurements = countMatchingBatch(
+                    pending.stream().map(byId::get).toList(), bucket);
+            for (Long ruleId : List.copyOf(pending)) {
+                AlertRule rule = byId.get(ruleId);
+                long measured = measurements.getOrDefault(ruleId, 0L);
+                if (fires(measured, rule.threshold(), rule.comparator())) {
+                    openIncident(rule, granularity, bucket, measured);
+                    pending.remove(ruleId);
+                }
             }
         }
     }
@@ -144,13 +184,19 @@ public class AlertEvaluator {
                         "geoAreaId", incident.geoAreaId() == null ? "" : incident.geoAreaId(),
                         "measuredValue", incident.measuredValue(),
                         "threshold", incident.threshold()))));
-        incidents.recordNotificationResult(
+        boolean recorded = incidents.recordNotificationResult(
                 incident.incidentId(),
+                attempt,
                 ok,
                 Instant.now(),
                 Math.max(1, notificationRetrySeconds),
                 Math.max(1, notificationMaxAttempts),
                 ok ? null : "Notification service rejected delivery");
+        if (!recorded) {
+            log.warn("{\"event\":\"stale_notification_result\",\"incidentId\":{},\"attempt\":{}}",
+                    incident.incidentId(), attempt);
+            return;
+        }
         operations.publish(
                 incident,
                 ok ? "visitor.alert.notification_dispatched" : "visitor.alert.notification_failed",
@@ -176,7 +222,74 @@ public class AlertEvaluator {
         return v == null ? 0L : v;
     }
 
+    Map<Long, Long> countMatchingBatch(List<AlertRule> batch, Instant bucket) {
+        if (batch.isEmpty()) return Map.of();
+        String values = batch.stream().map(ignored -> "(?, ?, ?, ?, ?, ?)")
+                .collect(Collectors.joining(", "));
+        String sql = """
+                with requested(rule_id, site_id, event_type, geo_level, geo_area_id, granularity) as (
+                    values %s
+                )
+                select requested.rule_id, coalesce(sum(r.event_count), 0) as measured
+                from requested
+                left join geo_time_rollups r
+                  on r.site_id = requested.site_id
+                 and r.granularity = requested.granularity
+                 and r.bucket_time = ?
+                 and r.event_type = requested.event_type
+                 and r.geo_level = requested.geo_level
+                 and (requested.geo_area_id = '' or r.geo_area_id = requested.geo_area_id)
+                group by requested.rule_id
+                """.formatted(values);
+        List<Object> args = new ArrayList<>(batch.size() * 6 + 1);
+        for (AlertRule rule : batch) {
+            args.add(rule.ruleId());
+            args.add(rule.siteId());
+            args.add(rule.eventType());
+            args.add(rule.geoLevel());
+            args.add(rule.geoAreaId() == null ? "" : rule.geoAreaId());
+            args.add(rule.granularity());
+        }
+        args.add(Timestamp.from(bucket));
+        Map<Long, Long> result = new HashMap<>();
+        RowCallbackHandler collector = rs ->
+                result.put(rs.getLong("rule_id"), rs.getLong("measured"));
+        jdbc.query(sql, collector, args.toArray());
+        return result;
+    }
+
+    private static void compile(AlertRule rule) {
+        if (!"5m".equals(rule.granularity()) && !"1d".equals(rule.granularity())) {
+            throw new IllegalArgumentException("Unsupported granularity: " + rule.granularity());
+        }
+        ComparatorPolicy.parse(rule.comparator());
+    }
+
     static boolean fires(long count, long threshold, String cmp) {
-        return ">=".equals(cmp) ? count >= threshold : count <= threshold;
+        return ComparatorPolicy.parse(cmp).test(count, threshold);
+    }
+
+    enum ComparatorPolicy {
+        AT_LEAST(">=") {
+            @Override boolean test(long measured, long threshold) { return measured >= threshold; }
+        },
+        AT_MOST("<=") {
+            @Override boolean test(long measured, long threshold) { return measured <= threshold; }
+        };
+
+        private final String wireValue;
+
+        ComparatorPolicy(String wireValue) {
+            this.wireValue = wireValue;
+        }
+
+        abstract boolean test(long measured, long threshold);
+
+        static ComparatorPolicy parse(String value) {
+            for (ComparatorPolicy policy : values()) {
+                if (policy.wireValue.equals(value)) return policy;
+            }
+            throw new IllegalArgumentException("Unsupported comparator: " + value);
+        }
     }
 }

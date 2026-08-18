@@ -70,12 +70,14 @@ public class AlertIncidentRepository {
         int inserted = jdbc.update("""
                 insert into incidents
                     (rule_id, site_id, geo_area_id, bucket_time, granularity,
-                     measured_value, threshold, comparator, dedup_key)
-                values (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                     measured_value, threshold, comparator, dedup_key,
+                     rule_version, rule_snapshot)
+                values (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, cast(? as jsonb))
                 on conflict (dedup_key) do nothing
                 """,
                 rule.ruleId(), rule.siteId(), rule.geoAreaId(), Timestamp.from(bucket),
-                rule.granularity(), measuredValue, rule.threshold(), rule.comparator(), dedupKey);
+                rule.granularity(), measuredValue, rule.threshold(), rule.comparator(), dedupKey,
+                rule.version(), ruleSnapshot(rule));
         return inserted == 0 ? Optional.empty() : findByDedupKey(dedupKey);
     }
 
@@ -137,14 +139,15 @@ public class AlertIncidentRepository {
         return jdbc.query(SELECT + " where i.incident_id = ?", MAPPER, incidentId).stream().findFirst();
     }
 
-    public void recordNotificationResult(
+    public boolean recordNotificationResult(
             long incidentId,
+            int expectedAttempt,
             boolean delivered,
             Instant now,
             long retrySeconds,
             int maxAttempts,
             String error) {
-        jdbc.update("""
+        return jdbc.update("""
                 update incidents
                 set notification_state = case
                         when ? then 'DELIVERED'
@@ -161,9 +164,10 @@ public class AlertIncidentRepository {
                     notified_at = case when ? then ? else notified_at end
                 where incident_id = ?
                   and notification_state = 'DELIVERING'
+                  and notification_attempts = ?
                 """, delivered, Math.max(1, maxAttempts), delivered,
                 Timestamp.from(now), Math.max(1, retrySeconds), delivered, error,
-                delivered, delivered, Timestamp.from(now), incidentId);
+                delivered, delivered, Timestamp.from(now), incidentId, expectedAttempt) == 1;
     }
 
     public AlertIncidentPage findRecent(
@@ -215,6 +219,20 @@ public class AlertIncidentRepository {
 
     private static String area(String value) {
         return value == null ? "" : value;
+    }
+
+    private static String ruleSnapshot(AlertRule rule) {
+        return """
+                {"ruleId":%d,"version":%d,"siteId":"%s","eventType":"%s","geoLevel":"%s",\
+                "geoAreaId":"%s","granularity":"%s","threshold":%d,"comparator":"%s","cooldownSeconds":%d}
+                """.formatted(
+                rule.ruleId(), rule.version(), json(rule.siteId()), json(rule.eventType()),
+                json(rule.geoLevel()), json(area(rule.geoAreaId())), json(rule.granularity()),
+                rule.threshold(), json(rule.comparator()), rule.cooldownSeconds()).replace("\n", "");
+    }
+
+    private static String json(String value) {
+        return value == null ? "" : value.replace("\\", "\\\\").replace("\"", "\\\"");
     }
 
     private record QueryParts(String where, List<Object> args) {}
