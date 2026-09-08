@@ -11,13 +11,12 @@ import site.yuqi.analytics.alerts.repo.AlertRuleRepository;
 
 import java.time.Instant;
 import java.util.*;
-import java.util.concurrent.ConcurrentHashMap;
 
 /**
  * Implements the two-phase prepare/apply pattern for alert rule changes.
  * <p>
  * Prepare: validates the request, computes a diff, and stores a change token
- * in memory with a 5-minute TTL. Each token is single-use.
+ * in the database with a 5-minute TTL. Each token is single-use.
  * <p>
  * Apply: consumes the token and atomically applies the change with optimistic
  * version locking + audit revision.
@@ -32,15 +31,10 @@ public class AlertRuleChangeService {
     private final ObjectMapper objectMapper;
 
     private static final long CHANGE_TTL_MS = 5 * 60 * 1000L; // 5 minutes
-    private final ConcurrentHashMap<String, PendingChange> pendingChanges = new ConcurrentHashMap<>();
-
-    // Idempotency: track applied idempotency keys to prevent double-apply
-    private final ConcurrentHashMap<String, Map<String, Object>> appliedKeys = new ConcurrentHashMap<>();
 
     // ─── Prepare ─────────────────────────────────────────────────────────
 
     public PreparedChange prepare(PrepareChangeRequest request) {
-        evictExpired();
         validateAction(request.action());
         validatePatch(request.action(), request.patch());
 
@@ -63,7 +57,8 @@ public class AlertRuleChangeService {
         PendingChange pending = new PendingChange(
                 changeId, request.action(), request.ruleId(), request.patch(),
                 request.reason(), request.actor(), expectedVersion, beforeMap, expiresAt);
-        pendingChanges.put(changeId, pending);
+        jdbc.update("insert into alert_rule_changes(change_id,pending_json,expires_at) values (?,?,?)",
+                changeId, encode(pending), java.sql.Timestamp.from(expiresAt));
 
         return new PreparedChange(
                 changeId, request.action(), request.ruleId(),
@@ -74,15 +69,19 @@ public class AlertRuleChangeService {
 
     @Transactional
     public Map<String, Object> apply(ApplyChangeRequest request) {
-        // Idempotency check
-        if (request.idempotencyKey() != null && appliedKeys.containsKey(request.idempotencyKey())) {
-            return appliedKeys.get(request.idempotencyKey());
+        if(request.idempotencyKey()==null || request.idempotencyKey().isBlank() || request.idempotencyKey().length()>200)
+            throw new IllegalArgumentException("idempotencyKey is required (maximum 200 characters)");
+        var rows=jdbc.queryForList("select * from alert_rule_changes where change_id=? for update",request.changeId());
+        if(rows.isEmpty()) throw new IllegalArgumentException("Change not found: "+request.changeId());
+        var row=rows.get(0);
+        if(row.get("response_json")!=null) {
+            if(!request.idempotencyKey().equals(row.get("idempotency_key")))
+                throw new IllegalStateException("Change already applied using a different idempotency key");
+            return decode((String)row.get("response_json"),Map.class);
         }
-
-        PendingChange pending = pendingChanges.remove(request.changeId());
-        if (pending == null) {
-            throw new IllegalArgumentException("Change not found or already applied: " + request.changeId());
-        }
+        var reused=jdbc.queryForList("select change_id from alert_rule_changes where idempotency_key=?",request.idempotencyKey());
+        if(!reused.isEmpty()) throw new IllegalStateException("Idempotency key already belongs to another change");
+        PendingChange pending=decode((String)row.get("pending_json"),PendingChange.class);
         if (Instant.now().isAfter(pending.expiresAt())) {
             throw new IllegalStateException("Change expired at " + pending.expiresAt());
         }
@@ -103,12 +102,8 @@ public class AlertRuleChangeService {
                 "version", result.version(),
                 "action", pending.action());
 
-        // Store idempotency result
-        if (request.idempotencyKey() != null) {
-            appliedKeys.put(request.idempotencyKey(), response);
-            // Schedule cleanup after 10 minutes
-            scheduleIdempotencyCleanup(request.idempotencyKey());
-        }
+        jdbc.update("update alert_rule_changes set idempotency_key=?,response_json=?,applied_at=now() where change_id=?",
+                request.idempotencyKey(),encode(response),request.changeId());
 
         log.info("Applied change {} action={} ruleId={} actor={}",
                 pending.changeId(), pending.action(), result.ruleId(), pending.actor());
@@ -173,7 +168,7 @@ public class AlertRuleChangeService {
                     pending.actor(), pending.reason(), pending.changeId(),
                     beforeJson, afterJson);
         } catch (Exception e) {
-            log.warn("Failed to record revision for rule {}: {}", after.ruleId(), e.getMessage());
+            throw new IllegalStateException("Could not persist rule revision",e);
         }
     }
 
@@ -224,7 +219,8 @@ public class AlertRuleChangeService {
         for (Map.Entry<String, Object> e : after.entrySet()) {
             Object oldVal = before.get(e.getKey());
             if (!Objects.equals(oldVal, e.getValue())) {
-                diff.put(e.getKey(), Map.of("from", oldVal != null ? oldVal : "null", "to", e.getValue()));
+                Map<String,Object> change=new LinkedHashMap<>();
+                change.put("from",oldVal); change.put("to",e.getValue()); diff.put(e.getKey(),change);
             }
         }
         return diff;
@@ -293,17 +289,13 @@ public class AlertRuleChangeService {
         }
     }
 
-    private void evictExpired() {
-        Instant now = Instant.now();
-        pendingChanges.entrySet().removeIf(e -> now.isAfter(e.getValue().expiresAt()));
+    private String encode(Object value) {
+        try { return objectMapper.copy().findAndRegisterModules().writeValueAsString(value); }
+        catch(Exception e) { throw new IllegalArgumentException("Cannot encode prepared change",e); }
     }
-
-    private void scheduleIdempotencyCleanup(String key) {
-        // Simple delayed cleanup using virtual thread
-        Thread.startVirtualThread(() -> {
-            try { Thread.sleep(600_000); } catch (InterruptedException ignored) {}
-            appliedKeys.remove(key);
-        });
+    private <T> T decode(String value,Class<T> type) {
+        try { return objectMapper.copy().findAndRegisterModules().readValue(value,type); }
+        catch(Exception e) { throw new IllegalStateException("Cannot read stored change",e); }
     }
 
     private record PendingChange(

@@ -19,6 +19,7 @@ class AlertRuleChangeServiceTest {
 
     private AlertRuleChangeService service;
     private AlertRuleRepository repo;
+    private JdbcTemplate jdbc;
 
     @BeforeEach
     void setUp() {
@@ -27,7 +28,7 @@ class AlertRuleChangeServiceTest {
                 .setName("alerts-change-test;MODE=PostgreSQL;DATABASE_TO_LOWER=TRUE")
                 .addScript("classpath:test-schema.sql")
                 .build();
-        JdbcTemplate jdbc = new JdbcTemplate(db);
+        jdbc = new JdbcTemplate(db);
         repo = new AlertRuleRepository(jdbc, db);
         service = new AlertRuleChangeService(repo, jdbc, new ObjectMapper());
     }
@@ -47,6 +48,21 @@ class AlertRuleChangeServiceTest {
         assertThat(result.after()).containsEntry("threshold", 100L);
         assertThat(result.expiresAt()).isNotNull();
         assertThat(result.expectedVersion()).isZero();
+    }
+
+    @Test
+    void preparedChangeSurvivesServiceRestart() {
+        var prepared=service.prepare(new PrepareChangeRequest("CREATE",null,
+                new AlertRulePatch("restart-test","page_view","GLOBAL",null,"5m",10L,">=",60,false,"test.site"),
+                "restart test","admin"));
+        service=new AlertRuleChangeService(repo,jdbc,new ObjectMapper());
+        var first=service.apply(new ApplyChangeRequest(prepared.changeId(),"restart-key"));
+        service=new AlertRuleChangeService(repo,jdbc,new ObjectMapper());
+        var second=service.apply(new ApplyChangeRequest(prepared.changeId(),"restart-key"));
+        assertThat(second.get("action")).isEqualTo(first.get("action"));
+        assertThat(repo.findAll()).hasSize(1);
+        assertThatThrownBy(() -> service.apply(new ApplyChangeRequest(prepared.changeId(),"changed-key")))
+                .isInstanceOf(IllegalStateException.class);
     }
 
     @Test
@@ -200,9 +216,13 @@ class AlertRuleChangeServiceTest {
                 "test idempotency", "admin"));
 
         Map<String, Object> first = service.apply(new ApplyChangeRequest(prepared.changeId(), "same-key"));
-        Map<String, Object> second = service.apply(new ApplyChangeRequest("any-id", "same-key"));
+        Map<String, Object> second = service.apply(new ApplyChangeRequest(prepared.changeId(), "same-key"));
 
-        assertThat(first).isEqualTo(second);
+        assertThat(second.get("action")).isEqualTo(first.get("action"));
+        assertThat(((Number)second.get("ruleId")).longValue()).isEqualTo(((Number)first.get("ruleId")).longValue());
+        assertThat(repo.findById(existing.ruleId()).orElseThrow().version()).isEqualTo(2);
+        assertThatThrownBy(() -> service.apply(new ApplyChangeRequest("any-id", "same-key")))
+                .isInstanceOf(IllegalArgumentException.class);
     }
 
     @Test
