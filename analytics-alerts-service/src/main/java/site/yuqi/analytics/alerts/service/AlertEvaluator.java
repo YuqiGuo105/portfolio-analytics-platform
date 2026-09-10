@@ -41,6 +41,7 @@ public class AlertEvaluator {
     private final NotificationSender sender;
     private final AlertIncidentRepository incidents;
     private final OperationEventPublisher operations;
+    private final AlertNotificationDetails notificationDetails;
 
     @Value("${analytics.alerts.enabled:true}")
     private boolean evalEnabled;
@@ -211,17 +212,13 @@ public class AlertEvaluator {
     private void deliver(AlertIncident incident) {
         int attempt = incident.notificationAttempts();
         String correlationId = "visitor-alert:" + incident.incidentId();
-        String alertBody = "%s %s threshold %d (measured %d, bucket %s)".formatted(
-                incident.comparator(),
-                incident.ruleName(),
-                incident.threshold(),
-                incident.measuredValue(),
-                incident.bucketTime());
+        String alertBody = notificationDetails.summaryFor(incident);
         boolean ok = sender.send(Map.ofEntries(
                 Map.entry("eventType", "ANALYTICS_ALERT_TRIGGERED"),
                 Map.entry("topic", "ADMIN_ALERTS"),
-                Map.entry("title", "Alert: " + incident.ruleName()),
+                Map.entry("title", incident.ruleName()),
                 Map.entry("summary", alertBody),
+                Map.entry("url", "/admin/visitors"),
                 Map.entry("sourceType", "ALERT"),
                 Map.entry("sourceId", String.valueOf(incident.ruleId())),
                 Map.entry("schemaVersion", 1),

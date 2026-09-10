@@ -50,7 +50,9 @@ class AlertEvaluatorTest {
         when(incidents.existsWithinCooldown(any(), any())).thenReturn(false);
         when(incidents.recordNotificationResult(anyLong(), anyInt(), any(Boolean.class),
                 any(), anyLong(), anyInt(), any())).thenReturn(true);
-        eval = new AlertEvaluator(repo, jdbc, sender, incidents, operations);
+        var details = mock(AlertNotificationDetails.class);
+        when(details.summaryFor(any())).thenReturn("Visitor alert details");
+        eval = new AlertEvaluator(repo, jdbc, sender, incidents, operations, details);
     }
 
     @Test

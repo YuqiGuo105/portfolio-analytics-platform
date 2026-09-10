@@ -68,6 +68,16 @@ class AlertPostgresTest {
                   site_id text, bucket_time timestamptz, granularity text,
                   geo_level text, geo_area_id text, event_type text, event_count bigint)
                 """);
+        jdbc.execute("""
+                create table if not exists behavior_events (
+                  event_id text primary key, site_id text, event_name text, event_time timestamptz,
+                  server_time timestamptz, page_path text, device_type text, browser text,
+                  country text, region text, geo_area_id text)
+                """);
+        jdbc.execute("""
+                create table if not exists geo_areas (
+                  geo_area_id text primary key, geo_level text, name text)
+                """);
         incidents = new AlertIncidentRepository(jdbc);
         rules = new AlertRuleRepository(jdbc, ds);
         notificationServer = HttpServer.create(new InetSocketAddress("127.0.0.1", 0), 0);
@@ -81,7 +91,8 @@ class AlertPostgresTest {
         var sender = new NotificationSender(RestClient.builder()
                 .baseUrl("http://127.0.0.1:" + notificationServer.getAddress().getPort()).build());
         ReflectionTestUtils.setField(sender, "token", "notification-test-token");
-        evaluator = new AlertEvaluator(rules, jdbc, sender, incidents, mock(OperationEventPublisher.class));
+        evaluator = new AlertEvaluator(rules, jdbc, sender, incidents, mock(OperationEventPublisher.class),
+                new AlertNotificationDetails(jdbc, "UTC"));
         ReflectionTestUtils.setField(evaluator, "evalEnabled", true);
         ReflectionTestUtils.setField(evaluator, "notificationRetrySeconds", 60L);
         ReflectionTestUtils.setField(evaluator, "notificationRetryBatchSize", 3);
@@ -94,7 +105,8 @@ class AlertPostgresTest {
 
     @BeforeEach
     void reset() {
-        jdbc.execute("truncate incidents, alert_rules, geo_time_rollups restart identity cascade");
+        jdbc.execute("truncate incidents, alert_rules, geo_time_rollups, behavior_events, geo_areas restart identity cascade");
+        jdbc.update("insert into geo_areas values ('METRO:US:TX:Austin', 'METRO', 'Austin')");
         requests.clear();
         tokens.clear();
         notificationStatus.set(202);
@@ -110,6 +122,17 @@ class AlertPostgresTest {
     @Test
     void emptyRetryQueueExecutesWithoutPostgresTypeError() {
         assertThat(incidents.claimPendingNotifications(Instant.now(), 3, 120)).isEmpty();
+    }
+
+    @Test
+    void incidentEvidenceCannotBeReadByAnonymousOrOrdinarySignedInDatabaseRoles() {
+        assertThat(jdbc.queryForObject("select relrowsecurity from pg_class where oid = 'public.incidents'::regclass",
+                Boolean.class)).isTrue();
+        for (String role : List.of("anon", "authenticated")) {
+            assertThat(jdbc.queryForObject("select has_table_privilege(?, 'public.incidents', 'SELECT')",
+                    Boolean.class, role)).isFalse();
+        }
+        assertThat(insert("server-access")).isNotNull();
     }
 
     @Test
@@ -242,6 +265,89 @@ class AlertPostgresTest {
 
     private AlertIncident insert(String key) {
         return incidents.insert(rule, Granularity.FIVE_MIN.floor(Instant.now()), 1, key).orElseThrow();
+    }
+
+    @Test
+    void detailsUseExactVisitTimeAndFrozenRuleThenRemainStableDuringRetry() {
+        Instant bucket = Instant.parse("2026-09-10T16:25:00Z");
+        visit("correct-event", "alerts-test", "page_view", bucket.plusSeconds(97), "US", "TX", "/cv");
+        visit("wrong-state", "alerts-test", "page_view", bucket.plusSeconds(110), "US", "CA", "/wrong");
+        visit("wrong-site", "other-site", "page_view", bucket.plusSeconds(110), "US", "TX", "/wrong");
+        visit("wrong-type", "alerts-test", "click", bucket.plusSeconds(110), "US", "TX", "/wrong");
+        visit("next-window", "alerts-test", "page_view", bucket.plusSeconds(300), "US", "TX", "/wrong");
+        visit("prior-window", "alerts-test", "page_view", bucket.minusSeconds(1), "US", "TX", "/wrong");
+        var incident = incidents.insert(rule, bucket, 1, "details").orElseThrow();
+        jdbc.update("update alert_rules set geo_area_id = 'REGION:US:CA' where rule_id = ?", rule.ruleId());
+        var details = new AlertNotificationDetails(jdbc, "America/Denver");
+        String first = details.summaryFor(incident);
+        assertThat(first).contains("Occurred at (event time): 2026-09-10 10:26:37 America/Denver",
+                "Received at (server time): 2026-09-10 10:26:39 America/Denver",
+                "Approximate location: Austin, TX, US", "Page: /cv", "Event ID: correct-event",
+                "Condition: count >= 1; measured 1", "Alert detected at:", "not a street address")
+                .doesNotContain("wrong-state", "wrong-site", "wrong-type", "next-window", "prior-window");
+        jdbc.update("delete from behavior_events");
+        assertThat(details.summaryFor(incident)).isEqualTo(first);
+    }
+
+    @Test
+    void detailsBoundExamplesAndHandleMissingEvidenceWithoutInventingVisitTime() {
+        Instant bucket = Instant.parse("2026-09-10T16:25:00Z");
+        for (int n = 0; n < 6; n++) {
+            visit("visit-" + n, "alerts-test", "page_view", bucket.plusSeconds(n), "US", "TX", "/");
+        }
+        var details = new AlertNotificationDetails(jdbc, "UTC");
+        String summary = details.summaryFor(incidents.insert(rule, bucket, 6, "bounded").orElseThrow());
+        assertThat(summary).contains("Event ID: visit-5", "Event ID: visit-4", "Event ID: visit-3", "measured 6")
+                .doesNotContain("Event ID: visit-2", "Visit 4");
+        String missing = details.summaryFor(incidents.insert(rule, bucket.plusSeconds(300), 1, "missing").orElseThrow());
+        assertThat(missing).contains("No individual matching record is available")
+                .doesNotContain("Occurred at (event time)", "Approximate location:");
+    }
+
+    @Test
+    void detailsMatchCountryMetroAndWildcardRulesWithoutCrossingTheCohort() {
+        Instant bucket = Instant.parse("2026-09-10T16:25:00Z");
+        visit("austin-event", "alerts-test", "page_view", bucket.plusSeconds(1), "US", "TX", "/");
+        visit("other-country", "alerts-test", "page_view", bucket.plusSeconds(2), "CA", "TX", "/wrong");
+        for (String[] scope : List.of(new String[]{"COUNTRY", "COUNTRY:US"},
+                new String[]{"METRO", "METRO:US:TX:Austin"}, new String[]{"REGION", "REGION:US:TX"})) {
+            var scopedRule = rules.insert(new AlertRuleRequest("alerts-test", "Scoped", "page_view", scope[0],
+                    scope[1], "5m", 1, ">=", 1800));
+            String summary = new AlertNotificationDetails(jdbc, "UTC").summaryFor(
+                    incidents.insert(scopedRule, bucket, 1, scope[0]).orElseThrow());
+            assertThat(summary).contains("austin-event").doesNotContain("other-country");
+        }
+        var global = rules.insert(new AlertRuleRequest("alerts-test", "Global", "page_view", "GLOBAL",
+                null, "5m", 1, ">=", 1800));
+        assertThat(new AlertNotificationDetails(jdbc, "UTC").summaryFor(
+                incidents.insert(global, bucket, 2, "global").orElseThrow()))
+                .contains("austin-event", "other-country");
+    }
+
+    private void visit(String id, String site, String event, Instant occurred, String country, String region, String path) {
+        jdbc.update("insert into behavior_events values (?, ?, ?, ?, ?, ?, 'desktop', 'Chrome', ?, ?, ?)",
+                id, site, event, Timestamp.from(occurred), Timestamp.from(occurred.plusSeconds(2)), path,
+                country, region, "METRO:" + country + ":" + region + ":Austin");
+    }
+
+    @Test
+    void replayProducesStableDetailedHttpPayloadForNotificationEndToEndTest() throws Exception {
+        Instant bucket = Granularity.FIVE_MIN.floor(Instant.now().minusSeconds(21600));
+        rollup(bucket, "5m", "REGION:US:TX", 1);
+        visit("replayed-austin-visit", "alerts-test", "page_view", bucket.plusSeconds(97), "US", "TX", "/cv");
+        notificationStatus.set(503);
+        assertThat(evaluator.replay(rule.ruleId(), bucket, bucket.plusSeconds(300))).isTrue();
+        assertThat(requests).hasSize(1);
+        jdbc.update("delete from behavior_events");
+        jdbc.update("update incidents set next_notification_attempt_at = ?", Timestamp.from(Instant.now().minusSeconds(1)));
+        notificationStatus.set(202);
+        evaluator.retryPendingNotifications();
+        assertThat(requests).hasSize(2);
+        assertThat(requests.get(1)).isEqualTo(requests.get(0))
+                .contains("replayed-austin-visit", "Austin, TX, US", "Occurred at (event time)", "/admin/visitors");
+        var output = java.nio.file.Path.of("target/test-artifacts/visitor-alert-payload.json");
+        java.nio.file.Files.createDirectories(output.getParent());
+        java.nio.file.Files.writeString(output, requests.get(0));
     }
 
     private void rollup(Instant bucket, String granularity, String area, long count) {

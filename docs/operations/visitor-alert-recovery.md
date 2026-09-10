@@ -22,6 +22,32 @@ concurrent claims, retry exhaustion, protected HTTP evaluation, downstream HTTP
 failure recovery, and replay deduplication. CI must supply these variables so the
 PostgreSQL tests are not skipped.
 
+## Visit Evidence in Email
+
+Alert emails distinguish the event timestamp, server receipt, evaluation window,
+and incident creation time. Up to three latest matching canonical events include
+their page path, event ID, device/browser and approximate city/region/country.
+The window's count remains the rule measurement; samples are not the entire cohort.
+No raw IP, coordinates, query strings, or inferred street addresses are included.
+Missing or expired records are explicitly labeled unavailable, never replaced by
+the current time. The first notification summary is persisted on the incident
+before dispatch so retries cannot change its evidence. Direct database access to
+incidents is denied to `anon` and `authenticated`; use the protected admin API.
+
+Set `ANALYTICS_ALERT_DISPLAY_ZONE` (also a GitHub Actions repository variable) to
+an IANA zone such as `America/Denver`; the default is explicitly labeled `UTC`.
+Deploy the notification-service change that preserves `ADMIN_ALERTS` bodies first,
+then the alerts service, or the old article preview formatter will truncate details.
+Existing delivered emails are immutable and are not automatically resent.
+
+The PostgreSQL HTTP replay test writes a synthetic payload to
+`analytics-alerts-service/target/test-artifacts/visitor-alert-payload.json`.
+In the notification-service checkout, pass its absolute path to
+`mvn test -Dalert.e2e.payload=/absolute/path/visitor-alert-payload.json` to verify
+the same payload through recipient fan-out, deduplication and captured MIME
+delivery. This test sends no real email and writes an HTML preview under
+`target/test-artifacts/visitor-alert-email.html`.
+
 ## Recover Missed Alerts
 
 Normal evaluation checks the current and previous bucket. For an outage longer
