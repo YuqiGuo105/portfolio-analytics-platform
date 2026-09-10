@@ -27,8 +27,16 @@ jobs:
       ALERT_TEST_JDBC_URL: jdbc:postgresql://127.0.0.1:5432/alerts_test
       ALERT_TEST_DB_USER: alerts_test
       ALERT_TEST_DB_PASSWORD: local-test-only
+      ANALYTICS_TEST_JDBC_URL: jdbc:postgresql://127.0.0.1:5432/analytics_test
+      ANALYTICS_TEST_DB_USER: alerts_test
+      ANALYTICS_TEST_DB_PASSWORD: local-test-only
     steps:
       - uses: actions/checkout@v4
+
+      - name: Create isolated analytics security test database
+        env:
+          PGPASSWORD: local-test-only
+        run: psql -h 127.0.0.1 -U alerts_test -d postgres -c 'CREATE DATABASE analytics_test'
 
       - name: Set up JDK 21
         uses: actions/setup-java@v4
