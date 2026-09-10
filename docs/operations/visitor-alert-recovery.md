@@ -46,7 +46,7 @@ than that window, an authenticated operator may send a JSON request to
 - `matched: true` means historical data met the rule, not that a new incident or
   email was necessarily created. `deliveryVerified` intentionally remains false.
 - Check `alerts.list_incidents` for the rule, then
-  `notification.get_publication_delivery` using `visitor-alert:<incidentId>` to
+  `notification.get_publication_delivery` using the idempotency key `incident:<incidentId>` to
   verify the downstream recipient delivery state before declaring recovery complete.
 
 Never place internal tokens in committed commands, logs, or screenshots. Do not
