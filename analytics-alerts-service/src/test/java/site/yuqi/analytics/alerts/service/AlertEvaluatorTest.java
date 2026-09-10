@@ -28,6 +28,7 @@ import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
+import static org.mockito.Mockito.spy;
 
 class AlertEvaluatorTest {
 
@@ -154,6 +155,44 @@ class AlertEvaluatorTest {
 
         verify(jdbc, never()).query(anyString(), any(org.springframework.jdbc.core.RowCallbackHandler.class),
                 any(Object[].class));
+    }
+
+    @Test
+    void brokenRetryQueueDoesNotBlockRuleEvaluation() {
+        ReflectionTestUtils.setField(eval, "evalEnabled", true);
+        AlertRule rule = sampleRule(100, ">=");
+        when(repo.findEnabled()).thenReturn(List.of(rule));
+        when(incidents.claimPendingNotifications(any(), anyInt(), anyLong()))
+                .thenThrow(new IllegalStateException("database recovery failure"));
+        AlertEvaluator observed = spy(eval);
+
+        assertThatCode(observed::tick).doesNotThrowAnyException();
+
+        verify(observed).evaluateBatch(List.of(rule));
+    }
+
+    @Test
+    void oneBrokenDeliveryDoesNotBlockOtherClaimedIncidents() {
+        AlertIncident first = claimedIncident();
+        AlertIncident second = sampleIncident();
+        when(incidents.claimPendingNotifications(any(), anyInt(), anyLong()))
+                .thenReturn(List.of(first, second));
+        when(sender.send(anyMap())).thenThrow(new IllegalStateException("unexpected failure")).thenReturn(true);
+
+        assertThatCode(eval::retryPendingNotifications).doesNotThrowAnyException();
+
+        verify(incidents).recordNotificationResult(eq(second.incidentId()), eq(second.notificationAttempts()),
+                eq(true), any(), anyLong(), anyInt(), eq(null));
+    }
+
+    @Test
+    void replayRejectsUnboundedOrFutureWindowsBeforeQuerying() {
+        Instant now = Instant.now();
+        org.assertj.core.api.Assertions.assertThatThrownBy(() -> eval.replay(42, now.minusSeconds(8 * 86400), now))
+                .isInstanceOf(IllegalArgumentException.class);
+        org.assertj.core.api.Assertions.assertThatThrownBy(() -> eval.replay(42, now, now.plusSeconds(60)))
+                .isInstanceOf(IllegalArgumentException.class);
+        verify(repo, never()).findById(anyLong());
     }
 
     private void stubCount(long value) {

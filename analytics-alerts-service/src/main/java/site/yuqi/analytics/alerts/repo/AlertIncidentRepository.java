@@ -102,7 +102,7 @@ public class AlertIncidentRepository {
                 ), claimed as (
                     update incidents i
                     set notification_state = 'DELIVERING',
-                        notification_lease_until = ? + (? * interval '1 second'),
+                        notification_lease_until = ?,
                         notification_attempts = notification_attempts + 1,
                         last_notification_attempt_at = ?
                     from candidates c
@@ -119,20 +119,20 @@ public class AlertIncidentRepository {
                 join alert_rules r on r.rule_id = i.rule_id
                 order by i.created_at
                 """, MAPPER, Timestamp.from(now), Timestamp.from(now), limit,
-                Timestamp.from(now), Math.max(1, leaseSeconds), Timestamp.from(now));
+                Timestamp.from(now.plusSeconds(Math.max(1, leaseSeconds))), Timestamp.from(now));
     }
 
     public Optional<AlertIncident> claimNotification(long incidentId, Instant now, long leaseSeconds) {
         int claimed = jdbc.update("""
                 update incidents
                 set notification_state = 'DELIVERING',
-                    notification_lease_until = ? + (? * interval '1 second'),
+                    notification_lease_until = ?,
                     notification_attempts = notification_attempts + 1,
                     last_notification_attempt_at = ?
                 where incident_id = ?
                   and notified = false
                   and notification_state in ('PENDING', 'RETRY_WAIT')
-                """, Timestamp.from(now), Math.max(1, leaseSeconds), Timestamp.from(now), incidentId);
+                """, Timestamp.from(now.plusSeconds(Math.max(1, leaseSeconds))), Timestamp.from(now), incidentId);
         if (claimed == 0) {
             return Optional.empty();
         }
@@ -157,7 +157,7 @@ public class AlertIncidentRepository {
                     notification_lease_until = null,
                     next_notification_attempt_at = case
                         when ? then next_notification_attempt_at
-                        else ? + (? * interval '1 second')
+                        else ?
                     end,
                     last_notification_error = case when ? then null else ? end,
                     notified = case when ? then true else notified end,
@@ -166,7 +166,7 @@ public class AlertIncidentRepository {
                   and notification_state = 'DELIVERING'
                   and notification_attempts = ?
                 """, delivered, Math.max(1, maxAttempts), delivered,
-                Timestamp.from(now), Math.max(1, retrySeconds), delivered, error,
+                Timestamp.from(now.plusSeconds(Math.max(1, retrySeconds))), delivered, error,
                 delivered, delivered, Timestamp.from(now), incidentId, expectedAttempt) == 1;
     }
 

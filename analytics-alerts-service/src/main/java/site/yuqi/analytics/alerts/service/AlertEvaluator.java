@@ -65,7 +65,12 @@ public class AlertEvaluator {
         if (!evalEnabled) {
             return;
         }
-        retryPendingNotifications();
+        // Delivery recovery must not prevent new rules from being evaluated.
+        try {
+            retryPendingNotifications();
+        } catch (RuntimeException e) {
+            log.error("Pending alert notification recovery failed; continuing rule evaluation", e);
+        }
         Map<String, List<AlertRule>> byGranularity = new HashMap<>();
         for (AlertRule rule : rules.findEnabled()) {
             try {
@@ -101,7 +106,11 @@ public class AlertEvaluator {
                 AlertRule rule = byId.get(ruleId);
                 long measured = measurements.getOrDefault(ruleId, 0L);
                 if (fires(measured, rule.threshold(), rule.comparator())) {
-                    openIncident(rule, granularity, bucket, measured);
+                    try {
+                        openIncident(rule, granularity, bucket, measured);
+                    } catch (RuntimeException e) {
+                        log.error("Alert incident processing failed for rule {}", ruleId, e);
+                    }
                     pending.remove(ruleId);
                 }
             }
@@ -153,9 +162,51 @@ public class AlertEvaluator {
         Instant now = Instant.now();
         for (AlertIncident incident : incidents.claimPendingNotifications(
                 now, batchSize, Math.max(1, notificationLeaseSeconds))) {
-            deliver(incident);
+            try {
+                deliver(incident);
+            } catch (RuntimeException e) {
+                // The durable lease expires so this incident remains recoverable.
+                log.error("Alert notification recovery failed for incident {}", incident.incidentId(), e);
+            }
         }
     }
+
+    /** Replay at most the newest matching stored bucket for one rule, retaining cooldown and dedup. */
+    public boolean replay(long ruleId, Instant from, Instant to) {
+        if (from == null || to == null || !from.isBefore(to)
+                || to.isAfter(Instant.now()) || Duration.between(from, to).compareTo(Duration.ofDays(7)) > 0) {
+            throw new IllegalArgumentException("Replay requires a past time window of at most 7 days");
+        }
+        AlertRule rule = rules.findById(ruleId)
+                .orElseThrow(() -> new IllegalArgumentException("Rule not found"));
+        compile(rule);
+        if (!evalEnabled || !rule.enabled() || !">=".equals(rule.comparator()) || rule.threshold() < 1) {
+            throw new IllegalArgumentException("Replay requires an enabled positive-threshold >= rule");
+        }
+        // A fixed range makes retries stable and prevents a missed week from generating an email flood.
+        List<ReplayBucket> matches = jdbc.query("""
+                select bucket_time, sum(event_count) as measured
+                from geo_time_rollups
+                where site_id = ? and granularity = ? and event_type = ?
+                  and geo_level = ? and (? = '' or geo_area_id = ?)
+                  and bucket_time >= ? and bucket_time < ?
+                group by bucket_time
+                having sum(event_count) >= ?
+                order by bucket_time desc
+                limit 1
+                """, (rs, row) -> new ReplayBucket(rs.getTimestamp("bucket_time").toInstant(), rs.getLong("measured")),
+                rule.siteId(), rule.granularity(), rule.eventType(), rule.geoLevel(),
+                rule.geoAreaId() == null ? "" : rule.geoAreaId(),
+                rule.geoAreaId() == null ? "" : rule.geoAreaId(),
+                Timestamp.from(from), Timestamp.from(to), rule.threshold());
+        if (matches.isEmpty()) return false;
+        ReplayBucket match = matches.getFirst();
+        openIncident(rule, "1d".equals(rule.granularity()) ? Granularity.ONE_DAY : Granularity.FIVE_MIN,
+                match.time(), match.measured());
+        return true;
+    }
+
+    private record ReplayBucket(Instant time, long measured) {}
 
     private void deliver(AlertIncident incident) {
         int attempt = incident.notificationAttempts();
