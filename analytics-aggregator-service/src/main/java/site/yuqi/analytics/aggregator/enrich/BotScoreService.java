@@ -9,8 +9,8 @@ import org.springframework.stereotype.Service;
  *
  * <p>Inputs are deliberately small: UA classification (from
  * {@link UaParserService}) and whether the request has no Referer. The
- * production wiring extends this with ASN scoring + Cloudflare bot
- * scores, but the contract for the rest of the pipeline doesn't change.
+ * This implementation does not verify network ownership or consume a
+ * provider bot score. A false bot flag is not proof of a human visitor.
  */
 @Service
 public class BotScoreService {

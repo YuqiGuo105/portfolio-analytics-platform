@@ -24,16 +24,23 @@ public class VisitorIntelligenceService {
                                                      String geoLevel, String geoAreaId,
                                                      int hours, int limit) {
         String area = geoAreaId == null ? "" : geoAreaId.trim();
+        String event = eventType == null || eventType.isBlank() ? "page_view"
+                : eventType.trim().toLowerCase(java.util.Locale.ROOT);
+        if (hours < 1 || hours > 2160) throw new IllegalArgumentException("hours must be between 1 and 2160");
+        Instant to = Instant.now();
+        Instant from = to.minusSeconds(3600L * hours);
         return jdbc.queryForList("""
                 select geo_level, geo_area_id, coalesce(sum(event_count), 0) as event_count,
-                       min(bucket_time) as first_bucket, max(bucket_time) as last_bucket
+                       min(bucket_time) as first_bucket, max(bucket_time) as last_bucket,
+                       '5m' as granularity, true as includes_bot_traffic
                 from geo_time_rollups
                 where site_id = ? and event_type = ? and geo_level = ?
-                  and bucket_time >= ? and (? = '' or geo_area_id = ?)
+                  and granularity = '5m'
+                  and bucket_time >= ? and bucket_time < ? and (? = '' or geo_area_id = ?)
                 group by geo_level, geo_area_id
                 order by event_count desc
                 limit ?
-                """, siteId, eventType, geoLevel, Timestamp.from(Instant.now().minusSeconds(3600L * Math.max(1, hours))),
+                """, siteId, event, geoLevel, Timestamp.from(from), Timestamp.from(to),
                 area, area, Math.max(1, Math.min(limit, 100)));
     }
 

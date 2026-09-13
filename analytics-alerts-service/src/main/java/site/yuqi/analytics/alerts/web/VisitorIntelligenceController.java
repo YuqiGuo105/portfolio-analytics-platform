@@ -2,12 +2,14 @@ package site.yuqi.analytics.alerts.web;
 
 import jakarta.validation.Valid;
 import lombok.RequiredArgsConstructor;
+import org.springframework.http.HttpStatus;
 import org.springframework.web.bind.annotation.GetMapping;
 import org.springframework.web.bind.annotation.PostMapping;
 import org.springframework.web.bind.annotation.RequestBody;
 import org.springframework.web.bind.annotation.RequestMapping;
 import org.springframework.web.bind.annotation.RequestParam;
 import org.springframework.web.bind.annotation.RestController;
+import org.springframework.web.server.ResponseStatusException;
 import site.yuqi.analytics.alerts.dto.AlertRuleRequest;
 import site.yuqi.analytics.alerts.dto.PreparedChange;
 import site.yuqi.analytics.alerts.service.RuleTemplateService;
@@ -25,11 +27,15 @@ public class VisitorIntelligenceController {
 
     @GetMapping("/segment-preview")
     public List<Map<String, Object>> preview(
-            @RequestParam String siteId, @RequestParam(defaultValue = "PAGE_VIEW") String eventType,
+            @RequestParam String siteId, @RequestParam(defaultValue = "page_view") String eventType,
             @RequestParam(defaultValue = "REGION") String geoLevel,
             @RequestParam(required = false) String geoAreaId,
             @RequestParam(defaultValue = "24") int hours, @RequestParam(defaultValue = "20") int limit) {
-        return visitors.segmentPreview(siteId, eventType, geoLevel, geoAreaId, hours, limit);
+        try {
+            return visitors.segmentPreview(siteId, eventType, geoLevel, geoAreaId, hours, limit);
+        } catch (IllegalArgumentException e) {
+            throw new ResponseStatusException(HttpStatus.BAD_REQUEST, e.getMessage(), e);
+        }
     }
 
     @PostMapping("/rule-test")

@@ -16,6 +16,10 @@ public class UaParserService {
 
     private static final Pattern BOT_PATTERN = Pattern.compile(
             "(?i)\\b(bot|spider|crawl|scraper|preview|monitor|http|wget|curl|python|go-http|java/)\\b");
+    // Product tokens may be embedded in a browser-like UA and need not contain the word "bot".
+    private static final Pattern AUTOMATION_PRODUCT = Pattern.compile(
+            "(?i)(?:^|[\\s(;])(?:meta-(?:externalagent|externalfetcher|webindexer)|facebookexternalhit"
+                    + "|[a-z0-9_-]*(?:bot|crawler|spider)|headlesschrome|phantomjs)(?=[/\\s;)]|$)");
     private static final Pattern MOBILE_PATTERN = Pattern.compile(
             "(?i)\\b(iphone|android|mobile|ipod)\\b");
     private static final Pattern TABLET_PATTERN = Pattern.compile(
@@ -32,7 +36,7 @@ public class UaParserService {
     }
 
     private String classifyDevice(String ua) {
-        if (BOT_PATTERN.matcher(ua).find()) return "bot";
+        if (AUTOMATION_PRODUCT.matcher(ua).find() || BOT_PATTERN.matcher(ua).find()) return "bot";
         if (TABLET_PATTERN.matcher(ua).find()) return "tablet";
         if (MOBILE_PATTERN.matcher(ua).find()) return "mobile";
         return "desktop";
