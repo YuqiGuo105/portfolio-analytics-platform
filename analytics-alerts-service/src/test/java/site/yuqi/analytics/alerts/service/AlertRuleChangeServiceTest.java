@@ -51,6 +51,51 @@ class AlertRuleChangeServiceTest {
     }
 
     @Test
+    void nestedFilterIsAuditedPreservedForLegacyEditsAndCanBeResetExplicitly() throws Exception {
+        var mapper = new ObjectMapper();
+        var original = repo.insert(new AlertRuleRequest("test.site", "Texas", "page_view", "REGION",
+                "REGION:US:TX", "5m", 1, ">=", 1800));
+        var patch = mapper.readValue("{\"filters\":{\"bot\":\"EXCLUDE\"}}", AlertRulePatch.class);
+        var prepared = service.prepare(new PrepareChangeRequest("UPDATE", original.ruleId(), patch, "traffic filter", "admin"));
+        assertThat(prepared.diff()).containsOnlyKeys("filters");
+        service.apply(new ApplyChangeRequest(prepared.changeId(), "exclude-filter-key"));
+        var legacy = new AlertRuleRequest(original.siteId(), "Renamed", original.eventType(), original.geoLevel(),
+                original.geoAreaId(), original.granularity(), original.threshold(), original.comparator(), original.cooldownSeconds());
+        assertThat(repo.update(original.ruleId(), legacy).orElseThrow().filters().bot()).isEqualTo(AlertRuleFilters.Bot.EXCLUDE);
+        var edit = service.prepare(new PrepareChangeRequest("UPDATE", original.ruleId(),
+                mapper.readValue("{\"threshold\":2}", AlertRulePatch.class), "raise threshold", "admin"));
+        assertThat(edit.diff()).containsOnlyKeys("threshold");
+        service.apply(new ApplyChangeRequest(edit.changeId(), "legacy-edit-key"));
+        assertThat(repo.findById(original.ruleId()).orElseThrow().filters().bot()).isEqualTo(AlertRuleFilters.Bot.EXCLUDE);
+        var reset = service.prepare(new PrepareChangeRequest("UPDATE", original.ruleId(),
+                mapper.readValue("{\"filters\":{\"bot\":\"ALL\"}}", AlertRulePatch.class), "restore all", "admin"));
+        service.apply(new ApplyChangeRequest(reset.changeId(), "reset-filter-key"));
+        assertThat(repo.findById(original.ruleId()).orElseThrow().filters().bot()).isEqualTo(AlertRuleFilters.Bot.ALL);
+        assertThatThrownBy(() -> service.prepare(new PrepareChangeRequest("SET_ENABLED", original.ruleId(), patch, "wrong action", "admin")))
+                .isInstanceOf(IllegalArgumentException.class);
+    }
+
+    @Test
+    void filterChangesRespectVersionAndExpiryGuards() throws Exception {
+        var rule = repo.insert(new AlertRuleRequest("test.site", "Texas", "page_view", "REGION",
+                "REGION:US:TX", "5m", 1, ">=", 1800));
+        var patch = new ObjectMapper().readValue("{\"filters\":{\"bot\":\"EXCLUDE\"}}", AlertRulePatch.class);
+        var stale = service.prepare(new PrepareChangeRequest("UPDATE", rule.ruleId(), patch, "filter", "admin"));
+        repo.setEnabled(rule.ruleId(), false);
+        assertThatThrownBy(() -> service.apply(new ApplyChangeRequest(stale.changeId(), "stale-filter-key")))
+                .isInstanceOf(IllegalStateException.class).hasMessageContaining("Version conflict");
+        var expired = service.prepare(new PrepareChangeRequest("UPDATE", rule.ruleId(), patch, "filter", "admin"));
+        var mapper = new ObjectMapper();
+        var stored = (com.fasterxml.jackson.databind.node.ObjectNode) mapper.readTree(jdbc.queryForObject(
+                "select pending_json from alert_rule_changes where change_id=?", String.class, expired.changeId()));
+        stored.put("expiresAt", "2020-01-01T00:00:00Z");
+        jdbc.update("update alert_rule_changes set pending_json=? where change_id=?", stored.toString(), expired.changeId());
+        assertThatThrownBy(() -> service.apply(new ApplyChangeRequest(expired.changeId(), "expired-filter-key")))
+                .isInstanceOf(IllegalStateException.class).hasMessageContaining("expired");
+        assertThat(repo.findById(rule.ruleId()).orElseThrow().filters().bot()).isEqualTo(AlertRuleFilters.Bot.ALL);
+    }
+
+    @Test
     void preparedChangeSurvivesServiceRestart() {
         var prepared=service.prepare(new PrepareChangeRequest("CREATE",null,
                 new AlertRulePatch("restart-test","page_view","GLOBAL",null,"5m",10L,">=",60,false,"test.site"),

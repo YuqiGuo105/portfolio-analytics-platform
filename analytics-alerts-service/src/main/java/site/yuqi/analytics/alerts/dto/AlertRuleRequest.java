@@ -13,5 +13,13 @@ public record AlertRuleRequest(
         @NotBlank @Pattern(regexp = "5m|1d") String granularity,
         @Min(0) long threshold,
         @NotBlank @Pattern(regexp = ">=|<=") String comparator,
-        @Min(60) int cooldownSeconds
-) {}
+        @Min(60) int cooldownSeconds,
+        AlertRuleFilters filters
+) {
+    public AlertRuleRequest(String siteId, String name, String eventType, String geoLevel,
+                            String geoAreaId, String granularity, long threshold, String comparator,
+                            int cooldownSeconds) {
+        this(siteId, name, eventType, geoLevel, geoAreaId, granularity, threshold,
+                comparator, cooldownSeconds, null);
+    }
+}

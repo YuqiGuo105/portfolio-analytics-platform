@@ -12,6 +12,10 @@ import org.springframework.test.web.servlet.setup.MockMvcBuilders;
 import org.springframework.web.client.RestClient;
 import site.yuqi.analytics.alerts.dto.AlertIncident;
 import site.yuqi.analytics.alerts.dto.AlertRule;
+import site.yuqi.analytics.alerts.dto.AlertRuleFilters;
+import site.yuqi.analytics.alerts.web.AlertRuleController;
+import site.yuqi.analytics.alerts.web.VisitorIntelligenceController;
+import com.fasterxml.jackson.databind.ObjectMapper;
 import site.yuqi.analytics.alerts.dto.AlertRuleRequest;
 import site.yuqi.analytics.alerts.dto.NotificationDeliveryState;
 import site.yuqi.analytics.alerts.operations.OperationEventPublisher;
@@ -78,6 +82,8 @@ class AlertPostgresTest {
                 create table if not exists geo_areas (
                   geo_area_id text primary key, geo_level text, name text)
                 """);
+        jdbc.execute("alter table geo_time_rollups add column if not exists is_bot boolean default false");
+        jdbc.execute("alter table behavior_events add column if not exists is_bot boolean default false");
         incidents = new AlertIncidentRepository(jdbc);
         rules = new AlertRuleRepository(jdbc, ds);
         notificationServer = HttpServer.create(new InetSocketAddress("127.0.0.1", 0), 0);
@@ -99,13 +105,17 @@ class AlertPostgresTest {
         ReflectionTestUtils.setField(evaluator, "notificationLeaseSeconds", 120L);
         ReflectionTestUtils.setField(evaluator, "notificationMaxAttempts", 3);
         ReflectionTestUtils.setField(evaluator, "lookbackBuckets", 2);
-        http = MockMvcBuilders.standaloneSetup(new AlertEvaluationController(evaluator))
+        http = MockMvcBuilders.standaloneSetup(new AlertEvaluationController(evaluator),
+                new AlertRuleController(rules, new AlertRuleChangeService(rules, jdbc, new ObjectMapper())),
+                new VisitorIntelligenceController(new VisitorIntelligenceService(jdbc, rules, evaluator),
+                        mock(RuleTemplateService.class)))
                 .addFilters(new InternalTokenFilter("scheduler-test-token")).build();
     }
 
     @BeforeEach
     void reset() {
         jdbc.execute("truncate incidents, alert_rules, geo_time_rollups, behavior_events, geo_areas restart identity cascade");
+        jdbc.execute("truncate alert_rule_changes");
         jdbc.update("insert into geo_areas values ('METRO:US:TX:Austin', 'METRO', 'Austin')");
         requests.clear();
         tokens.clear();
@@ -325,7 +335,7 @@ class AlertPostgresTest {
     }
 
     private void visit(String id, String site, String event, Instant occurred, String country, String region, String path) {
-        jdbc.update("insert into behavior_events values (?, ?, ?, ?, ?, ?, 'desktop', 'Chrome', ?, ?, ?)",
+        jdbc.update("insert into behavior_events (event_id, site_id, event_name, event_time, server_time, page_path, device_type, browser, country, region, geo_area_id) values (?, ?, ?, ?, ?, ?, 'desktop', 'Chrome', ?, ?, ?)",
                 id, site, event, Timestamp.from(occurred), Timestamp.from(occurred.plusSeconds(2)), path,
                 country, region, "METRO:" + country + ":" + region + ":Austin");
     }
@@ -351,8 +361,120 @@ class AlertPostgresTest {
     }
 
     private void rollup(Instant bucket, String granularity, String area, long count) {
-        jdbc.update("insert into geo_time_rollups values (?, ?, ?, ?, ?, ?, ?)",
-                rule.siteId(), Timestamp.from(bucket), granularity, "REGION", area, "page_view", count);
+        rollup(bucket, granularity, area, count, false);
+    }
+
+    private void rollup(Instant bucket, String granularity, String area, long count, Boolean bot) {
+        jdbc.update("insert into geo_time_rollups (site_id, bucket_time, granularity, geo_level, geo_area_id, event_type, event_count, is_bot) values (?, ?, ?, ?, ?, ?, ?, ?)",
+                rule.siteId(), Timestamp.from(bucket), granularity, "REGION", area, "page_view", count, bot);
+    }
+
+    @Test
+    void preparedBotFilterControlsPreviewScheduledDeliveryAndSnapshotWithoutDuplicateEmails() throws Exception {
+        var mapper = new ObjectMapper();
+        String proposal = """
+                {"action":"UPDATE","ruleId":%d,"patch":{"filters":{"bot":"EXCLUDE"}},
+                 "reason":"Exclude detected bots","actor":"test-admin"}
+                """.formatted(rule.ruleId());
+        http.perform(post("/api/alert-rules/changes/prepare").contentType("application/json").content(proposal))
+                .andExpect(status().isUnauthorized());
+        String preview = http.perform(post("/api/alert-rules/changes/prepare")
+                .header("X-Internal-Token", "scheduler-test-token").contentType("application/json").content(proposal))
+                .andExpect(status().isOk()).andReturn().getResponse().getContentAsString();
+        var prepared = mapper.readTree(preview);
+        assertThat(prepared.path("diff").size()).isEqualTo(1);
+        assertThat(prepared.at("/diff/filters/to/bot").asText()).isEqualTo("EXCLUDE");
+        assertThat(rules.findById(rule.ruleId()).orElseThrow().filters().bot()).isEqualTo(AlertRuleFilters.Bot.ALL);
+        String apply = mapper.writeValueAsString(java.util.Map.of("changeId", prepared.path("changeId").asText(),
+                "idempotencyKey", "bot-policy-test-key"));
+        for (int n = 0; n < 2; n++) {
+            http.perform(post("/api/alert-rules/changes/apply").header("X-Internal-Token", "scheduler-test-token")
+                    .contentType("application/json").content(apply)).andExpect(status().isOk());
+        }
+        rule = rules.findById(rule.ruleId()).orElseThrow();
+        assertThat(rule.version()).isEqualTo(2);
+        assertThat(rule.filters().bot()).isEqualTo(AlertRuleFilters.Bot.EXCLUDE);
+        assertThat(jdbc.queryForObject("select after_state #>> '{filters,bot}' from alert_rule_revisions where rule_id=?",
+                String.class, rule.ruleId())).isEqualTo("EXCLUDE");
+        Instant bucket = Granularity.FIVE_MIN.floor(Instant.now());
+        rollup(bucket, "5m", "REGION:US:TX", 20, true);
+        rollup(bucket, "5m", "REGION:US:TX", 3, null);
+        rollup(bucket, "5m", "REGION:US:CA", 2, false);
+        evaluate();
+        assertThat(requests).isEmpty();
+        rollup(bucket, "5m", "REGION:US:TX", 1, false);
+        visit("non-bot-visit", "alerts-test", "page_view", bucket.plusSeconds(1), "US", "TX", "/cv");
+        visit("bot-visit", "alerts-test", "page_view", bucket.plusSeconds(2), "US", "TX", "/");
+        visit("unclassified-visit", "alerts-test", "page_view", bucket.plusSeconds(3), "US", "TX", "/");
+        jdbc.update("update behavior_events set is_bot=true where event_id='bot-visit'");
+        jdbc.update("update behavior_events set is_bot=null where event_id='unclassified-visit'");
+        String draft = mapper.writeValueAsString(new AlertRuleRequest(rule.siteId(), rule.name(), rule.eventType(),
+                rule.geoLevel(), rule.geoAreaId(), rule.granularity(), 1, ">=", 1800, rule.filters()));
+        String tested = http.perform(post("/api/visitor-intelligence/rule-test")
+                .header("X-Internal-Token", "scheduler-test-token").contentType("application/json").content(draft))
+                .andExpect(status().isOk()).andReturn().getResponse().getContentAsString();
+        assertThat(mapper.readTree(tested).path("measured").asLong()).isEqualTo(1);
+        notificationStatus.set(503);
+        evaluate();
+        assertThat(requests).hasSize(1);
+        assertThat(requests.getFirst()).contains("non-bot-visit").doesNotContain("Event ID: bot-visit", "unclassified-visit");
+        assertThat(jdbc.queryForObject("select measured_value from incidents", Long.class)).isEqualTo(1);
+        assertThat(jdbc.queryForObject("select rule_snapshot #>> '{filters,bot}' from incidents", String.class)).isEqualTo("EXCLUDE");
+        jdbc.update("update alert_rules set bot_filter='ALL'");
+        jdbc.update("update incidents set next_notification_attempt_at=now() - interval '1 second'");
+        notificationStatus.set(202);
+        evaluate();
+        evaluate();
+        assertThat(requests).hasSize(2);
+        assertThat(requests.get(1)).isEqualTo(requests.get(0));
+    }
+
+    @Test
+    void botPoliciesStayConsistentAcrossSingleBatchReplayAndFrozenEvidence() {
+        Instant bucket = Granularity.FIVE_MIN.floor(Instant.now().minusSeconds(7200));
+        rollup(bucket, "5m", "REGION:US:TX", 7, true);
+        rollup(bucket, "5m", "REGION:US:TX", 3, false);
+        rollup(bucket, "5m", "REGION:US:TX", 2, null);
+        var exclude = rules.insert(new AlertRuleRequest(rule.siteId(), "Exclude", "page_view", "REGION",
+                rule.geoAreaId(), "5m", 1, ">=", 1800, new AlertRuleFilters(AlertRuleFilters.Bot.EXCLUDE)));
+        var only = rules.insert(new AlertRuleRequest(rule.siteId(), "Only", "page_view", "REGION",
+                rule.geoAreaId(), "5m", 1, ">=", 1800, new AlertRuleFilters(AlertRuleFilters.Bot.ONLY)));
+        var batch = evaluator.countMatchingBatch(List.of(rule, exclude, only), bucket);
+        assertThat(batch).containsEntry(rule.ruleId(), 12L).containsEntry(exclude.ruleId(), 3L).containsEntry(only.ruleId(), 7L);
+        for (var policy : List.of(rule, exclude, only)) {
+            assertThat(evaluator.countMatching(policy, bucket)).isEqualTo(batch.get(policy.ruleId()));
+        }
+        assertThat(evaluator.replay(exclude.ruleId(), bucket, bucket.plusSeconds(300))).isTrue();
+        assertThat(evaluator.replay(exclude.ruleId(), bucket, bucket.plusSeconds(300))).isTrue();
+        assertThat(requests).hasSize(1);
+        assertThat(jdbc.queryForObject("select measured_value from incidents", Long.class)).isEqualTo(3);
+        jdbc.update("delete from geo_time_rollups where is_bot is false");
+        assertThat(evaluator.replay(exclude.ruleId(), bucket, bucket.plusSeconds(300))).isFalse();
+
+        visit("human-example", rule.siteId(), "page_view", bucket.plusSeconds(1), "US", "TX", "/cv");
+        visit("bot-example", rule.siteId(), "page_view", bucket.plusSeconds(2), "US", "TX", "/");
+        jdbc.update("update behavior_events set is_bot=true where event_id='bot-example'");
+        var frozen = incidents.insert(exclude, bucket, 3, "frozen-filter").orElseThrow();
+        jdbc.update("update alert_rules set bot_filter='ALL' where rule_id=?", exclude.ruleId());
+        var details = new AlertNotificationDetails(jdbc, "UTC");
+        assertThat(details.summaryFor(frozen)).contains("human-example").doesNotContain("bot-example");
+        var bots = incidents.insert(only, bucket, 7, "bot-evidence").orElseThrow();
+        assertThat(details.summaryFor(bots)).contains("bot-example").doesNotContain("human-example");
+        var legacy = incidents.insert(rule, bucket, 12, "legacy-evidence").orElseThrow();
+        jdbc.update("update incidents set rule_snapshot=rule_snapshot - 'filters' where incident_id=?", legacy.incidentId());
+        assertThat(details.summaryFor(legacy)).contains("human-example", "bot-example");
+    }
+
+    @Test
+    void invalidNestedFiltersAreRejectedInsteadOfSilentlyBroadeningRule() throws Exception {
+        for (String patch : List.of("{\"filters\":{\"bot\":\"HUMAN\"}}", "{\"filters\":{}}",
+                "{\"filters\":{\"bot\":null}}", "{\"filters\":{\"bot\":\"EXCLUDE\",\"typo\":true}}",
+                "{\"excludeBots\":true}")) {
+            String body = "{\"action\":\"UPDATE\",\"ruleId\":%d,\"patch\":%s,\"reason\":\"test\"}".formatted(rule.ruleId(), patch);
+            http.perform(post("/api/alert-rules/changes/prepare").header("X-Internal-Token", "scheduler-test-token")
+                    .contentType("application/json").content(body)).andExpect(status().isBadRequest());
+        }
+        assertThat(rules.findById(rule.ruleId()).orElseThrow().version()).isEqualTo(1);
     }
 
     private void evaluate() throws Exception {

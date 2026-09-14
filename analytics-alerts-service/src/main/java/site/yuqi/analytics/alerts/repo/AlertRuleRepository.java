@@ -6,6 +6,7 @@ import org.springframework.jdbc.core.RowMapper;
 import org.springframework.jdbc.core.simple.SimpleJdbcInsert;
 import org.springframework.stereotype.Repository;
 import site.yuqi.analytics.alerts.dto.AlertRule;
+import site.yuqi.analytics.alerts.dto.AlertRuleFilters;
 import site.yuqi.analytics.alerts.dto.AlertRuleRequest;
 
 import javax.sql.DataSource;
@@ -32,7 +33,8 @@ public class AlertRuleRepository {
             rs.getString("comparator"),
             rs.getInt("cooldown_seconds"),
             rs.getBoolean("enabled"),
-            rs.getInt("version"));
+            rs.getInt("version"),
+            new AlertRuleFilters(AlertRuleFilters.Bot.valueOf(rs.getString("bot_filter"))));
 
     public List<AlertRule> findAll() {
         return jdbc.query("select * from alert_rules order by rule_id", MAPPER);
@@ -54,7 +56,7 @@ public class AlertRuleRepository {
         SimpleJdbcInsert ins = new SimpleJdbcInsert(dataSource)
                 .withTableName("alert_rules")
                 .usingColumns("site_id", "name", "event_type", "geo_level", "geo_area_id",
-                        "granularity", "threshold", "comparator", "cooldown_seconds", "enabled")
+                        "granularity", "threshold", "comparator", "cooldown_seconds", "enabled", "bot_filter")
                 .usingGeneratedKeyColumns("rule_id");
         Number id = ins.executeAndReturnKey(Map.ofEntries(
                 Map.entry("site_id", r.siteId()),
@@ -66,7 +68,8 @@ public class AlertRuleRepository {
                 Map.entry("threshold", r.threshold()),
                 Map.entry("comparator", r.comparator()),
                 Map.entry("cooldown_seconds", r.cooldownSeconds()),
-                Map.entry("enabled", enabled)
+                Map.entry("enabled", enabled),
+                Map.entry("bot_filter", r.filters() == null ? "ALL" : r.filters().bot().name())
         ));
         return findById(id.longValue()).orElseThrow();
     }
@@ -76,12 +79,14 @@ public class AlertRuleRepository {
                 update alert_rules set
                     site_id = ?, name = ?, event_type = ?, geo_level = ?, geo_area_id = ?,
                     granularity = ?, threshold = ?, comparator = ?, cooldown_seconds = ?,
+                    bot_filter = coalesce(?, bot_filter),
                     version = version + 1, updated_at = now()
                 where rule_id = ?
                 """,
                 r.siteId(), r.name(), r.eventType(), r.geoLevel(),
                 r.geoAreaId() == null ? "" : r.geoAreaId(),
                 r.granularity(), r.threshold(), r.comparator(), r.cooldownSeconds(),
+                r.filters() == null ? null : r.filters().bot().name(),
                 id);
         return rows == 0 ? Optional.empty() : findById(id);
     }
@@ -107,13 +112,14 @@ public class AlertRuleRepository {
                     site_id = ?, name = ?, event_type = ?, geo_level = ?, geo_area_id = ?,
                     granularity = ?, threshold = ?, comparator = ?, cooldown_seconds = ?,
                     enabled = coalesce(?, enabled),
+                    bot_filter = coalesce(?, bot_filter),
                     version = version + 1, updated_at = now()
                 where rule_id = ? and version = ?
                 """,
                 r.siteId(), r.name(), r.eventType(), r.geoLevel(),
                 r.geoAreaId() == null ? "" : r.geoAreaId(),
                 r.granularity(), r.threshold(), r.comparator(), r.cooldownSeconds(),
-                enabled, id, expectedVersion);
+                enabled, r.filters() == null ? null : r.filters().bot().name(), id, expectedVersion);
         if (rows == 0) return Optional.empty();
         return findById(id);
     }

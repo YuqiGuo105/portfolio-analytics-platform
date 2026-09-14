@@ -45,6 +45,9 @@ public class AlertNotificationDetails {
                     end as area) scope
                 where i.incident_id = ? and e.event_time >= ? and e.event_time < ?
                   and scope.area is not null
+                  and (coalesce(i.rule_snapshot #>> '{filters,bot}', 'ALL') = 'ALL'
+                       or (i.rule_snapshot #>> '{filters,bot}' = 'EXCLUDE' and e.is_bot is false)
+                       or (i.rule_snapshot #>> '{filters,bot}' = 'ONLY' and e.is_bot is true))
                   and (coalesce(i.rule_snapshot->>'geoAreaId', '') = ''
                        or scope.area = i.rule_snapshot->>'geoAreaId')
                 order by e.event_time desc, e.event_id

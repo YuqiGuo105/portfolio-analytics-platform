@@ -222,17 +222,11 @@ public class AlertIncidentRepository {
     }
 
     private static String ruleSnapshot(AlertRule rule) {
-        return """
-                {"ruleId":%d,"version":%d,"siteId":"%s","eventType":"%s","geoLevel":"%s",\
-                "geoAreaId":"%s","granularity":"%s","threshold":%d,"comparator":"%s","cooldownSeconds":%d}
-                """.formatted(
-                rule.ruleId(), rule.version(), json(rule.siteId()), json(rule.eventType()),
-                json(rule.geoLevel()), json(area(rule.geoAreaId())), json(rule.granularity()),
-                rule.threshold(), json(rule.comparator()), rule.cooldownSeconds()).replace("\n", "");
-    }
-
-    private static String json(String value) {
-        return value == null ? "" : value.replace("\\", "\\\\").replace("\"", "\\\"");
+        try {
+            return new com.fasterxml.jackson.databind.ObjectMapper().writeValueAsString(rule);
+        } catch (com.fasterxml.jackson.core.JsonProcessingException e) {
+            throw new IllegalArgumentException("Cannot snapshot alert rule", e);
+        }
     }
 
     private record QueryParts(String where, List<Object> args) {}
