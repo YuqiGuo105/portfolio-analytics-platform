@@ -123,7 +123,7 @@ public class AlertRuleChangeService {
                 p.granularity() != null ? p.granularity() : "5m",
                 p.threshold() != null ? p.threshold() : 0L,
                 p.comparator() != null ? p.comparator() : ">=",
-                p.cooldownSeconds() != null ? p.cooldownSeconds() : 1800);
+                p.cooldownSeconds() != null ? p.cooldownSeconds() : 1800, p.filters());
         return repo.insert(req, p.enabled() == null || p.enabled());
     }
 
@@ -140,7 +140,7 @@ public class AlertRuleChangeService {
                 p.granularity() != null ? p.granularity() : current.granularity(),
                 p.threshold() != null ? p.threshold() : current.threshold(),
                 p.comparator() != null ? p.comparator() : current.comparator(),
-                p.cooldownSeconds() != null ? p.cooldownSeconds() : current.cooldownSeconds());
+                p.cooldownSeconds() != null ? p.cooldownSeconds() : current.cooldownSeconds(), p.filters());
         return repo.updateWithVersion(
                         pending.ruleId(), merged, p.enabled(), pending.expectedVersion())
                 .orElseThrow(() -> new IllegalStateException(
@@ -187,11 +187,13 @@ public class AlertRuleChangeService {
                 after.put("name", patch.name());
                 after.put("eventType", patch.eventType());
                 after.put("geoLevel", patch.geoLevel() != null ? patch.geoLevel() : "GLOBAL");
+                after.put("geoAreaId", patch.geoAreaId() == null ? "" : patch.geoAreaId());
                 after.put("granularity", patch.granularity() != null ? patch.granularity() : "5m");
                 after.put("threshold", patch.threshold() != null ? patch.threshold() : 0);
                 after.put("comparator", patch.comparator() != null ? patch.comparator() : ">=");
                 after.put("cooldownSeconds", patch.cooldownSeconds() != null ? patch.cooldownSeconds() : 1800);
                 after.put("enabled", patch.enabled() == null || patch.enabled());
+                after.put("filters", Map.of("bot", patch.filters() == null ? "ALL" : patch.filters().bot().name()));
             }
             case "UPDATE" -> {
                 if (before != null) after.putAll(ruleToMap(before));
@@ -205,6 +207,7 @@ public class AlertRuleChangeService {
                 if (patch.comparator() != null) after.put("comparator", patch.comparator());
                 if (patch.cooldownSeconds() != null) after.put("cooldownSeconds", patch.cooldownSeconds());
                 if (patch.enabled() != null) after.put("enabled", patch.enabled());
+                if (patch.filters() != null) after.put("filters", Map.of("bot", patch.filters().bot().name()));
             }
             case "SET_ENABLED" -> {
                 if (before != null) after.putAll(ruleToMap(before));
@@ -235,12 +238,18 @@ public class AlertRuleChangeService {
         if (patch != null && patch.threshold() != null && patch.threshold() == 0) {
             warnings.add("Threshold is 0 — this rule will always fire.");
         }
+        if (patch != null && patch.filters() != null && patch.filters().bot().name().equals("EXCLUDE")) {
+            warnings.add("Excludes detected bots and unclassified records; non-bot classification is not proof of a human visitor.");
+        }
         return warnings;
     }
 
     private void validatePatch(String action, AlertRulePatch patch) {
         if (patch == null) {
             throw new IllegalArgumentException("patch is required");
+        }
+        if ("SET_ENABLED".equals(action) && patch.filters() != null) {
+            throw new IllegalArgumentException("Use UPDATE to change filters");
         }
         if ("CREATE".equals(action)) {
             requireText(patch.siteId(), "siteId");

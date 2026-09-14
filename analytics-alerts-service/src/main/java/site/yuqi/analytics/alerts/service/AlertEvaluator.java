@@ -191,6 +191,7 @@ public class AlertEvaluator {
                 where site_id = ? and granularity = ? and event_type = ?
                   and geo_level = ? and (? = '' or geo_area_id = ?)
                   and bucket_time >= ? and bucket_time < ?
+                  and (? = 'ALL' or (? = 'EXCLUDE' and is_bot is false) or (? = 'ONLY' and is_bot is true))
                 group by bucket_time
                 having sum(event_count) >= ?
                 order by bucket_time desc
@@ -199,7 +200,8 @@ public class AlertEvaluator {
                 rule.siteId(), rule.granularity(), rule.eventType(), rule.geoLevel(),
                 rule.geoAreaId() == null ? "" : rule.geoAreaId(),
                 rule.geoAreaId() == null ? "" : rule.geoAreaId(),
-                Timestamp.from(from), Timestamp.from(to), rule.threshold());
+                Timestamp.from(from), Timestamp.from(to),
+                rule.filters().bot().name(), rule.filters().bot().name(), rule.filters().bot().name(), rule.threshold());
         if (matches.isEmpty()) return false;
         ReplayBucket match = matches.getFirst();
         openIncident(rule, "1d".equals(rule.granularity()) ? Granularity.ONE_DAY : Granularity.FIVE_MIN,
@@ -262,20 +264,22 @@ public class AlertEvaluator {
                   and event_type = ?
                   and geo_level = ?
                   and (? = '' or geo_area_id = ?)
+                  and (? = 'ALL' or (? = 'EXCLUDE' and is_bot is false) or (? = 'ONLY' and is_bot is true))
                 """;
         Long v = jdbc.queryForObject(sql, Long.class,
                 r.siteId(), r.granularity(), Timestamp.from(bucket), r.eventType(), r.geoLevel(),
                 r.geoAreaId() == null ? "" : r.geoAreaId(),
-                r.geoAreaId() == null ? "" : r.geoAreaId());
+                r.geoAreaId() == null ? "" : r.geoAreaId(),
+                r.filters().bot().name(), r.filters().bot().name(), r.filters().bot().name());
         return v == null ? 0L : v;
     }
 
     Map<Long, Long> countMatchingBatch(List<AlertRule> batch, Instant bucket) {
         if (batch.isEmpty()) return Map.of();
-        String values = batch.stream().map(ignored -> "(?, ?, ?, ?, ?, ?)")
+        String values = batch.stream().map(ignored -> "(?, ?, ?, ?, ?, ?, ?)")
                 .collect(Collectors.joining(", "));
         String sql = """
-                with requested(rule_id, site_id, event_type, geo_level, geo_area_id, granularity) as (
+                with requested(rule_id, site_id, event_type, geo_level, geo_area_id, granularity, bot_filter) as (
                     values %s
                 )
                 select requested.rule_id, coalesce(sum(r.event_count), 0) as measured
@@ -287,9 +291,12 @@ public class AlertEvaluator {
                  and r.event_type = requested.event_type
                  and r.geo_level = requested.geo_level
                  and (requested.geo_area_id = '' or r.geo_area_id = requested.geo_area_id)
+                 and (requested.bot_filter = 'ALL'
+                      or (requested.bot_filter = 'EXCLUDE' and r.is_bot is false)
+                      or (requested.bot_filter = 'ONLY' and r.is_bot is true))
                 group by requested.rule_id
                 """.formatted(values);
-        List<Object> args = new ArrayList<>(batch.size() * 6 + 1);
+        List<Object> args = new ArrayList<>(batch.size() * 7 + 1);
         for (AlertRule rule : batch) {
             args.add(rule.ruleId());
             args.add(rule.siteId());
@@ -297,6 +304,7 @@ public class AlertEvaluator {
             args.add(rule.geoLevel());
             args.add(rule.geoAreaId() == null ? "" : rule.geoAreaId());
             args.add(rule.granularity());
+            args.add(rule.filters().bot().name());
         }
         args.add(Timestamp.from(bucket));
         Map<Long, Long> result = new HashMap<>();

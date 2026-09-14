@@ -47,7 +47,7 @@ public class VisitorIntelligenceService {
     public Map<String, Object> test(AlertRuleRequest request) {
         AlertRule draft = new AlertRule(0L, request.siteId(), request.name(), request.eventType(),
                 request.geoLevel(), request.geoAreaId(), request.granularity(), request.threshold(),
-                request.comparator(), request.cooldownSeconds(), false, 0);
+                request.comparator(), request.cooldownSeconds(), false, 0, request.filters());
         Instant bucket = ("1d".equals(draft.granularity()) ? Granularity.ONE_DAY : Granularity.FIVE_MIN)
                 .floor(Instant.now());
         long measured = evaluator.countMatching(draft, bucket);
@@ -72,6 +72,8 @@ public class VisitorIntelligenceService {
                 Map.entry("ruleName", rule.name()), Map.entry("matched", matched),
                 Map.entry("measured", measured), Map.entry("comparator", rule.comparator()),
                 Map.entry("threshold", rule.threshold()), Map.entry("bucket", bucket),
+                Map.entry("filters", Map.of("bot", rule.filters().bot().name())),
+                Map.entry("trafficClassification", "Aggregator is_bot classification; not proof of a human visitor"),
                 Map.entry("dimensions", Map.of("siteId", rule.siteId(), "eventType", rule.eventType(),
                         "geoLevel", rule.geoLevel(), "geoAreaId", rule.geoAreaId() == null ? "" : rule.geoAreaId(),
                         "granularity", rule.granularity())),
