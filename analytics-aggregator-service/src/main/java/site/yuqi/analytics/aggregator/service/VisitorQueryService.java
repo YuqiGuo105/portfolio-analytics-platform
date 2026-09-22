@@ -98,6 +98,13 @@ public class VisitorQueryService {
         addContains(sql, params, "referrer", "coalesce(r.referrer, '')", query.referrer());
         addExact(sql, params, "sessionId", "r.session_id", query.sessionId());
 
+        BotFilter botFilter = query.botFilter() == null ? BotFilter.ALL : query.botFilter();
+        switch (botFilter) {
+            case EXCLUDE -> sql.append(" and b.is_bot = false");
+            case ONLY -> sql.append(" and b.is_bot = true");
+            case ALL -> { }
+        }
+
         if (!query.includeAdminTraffic() && hasText(query.excludedPathPrefix())) {
             sql.append("""
                      and lower(coalesce(
@@ -222,10 +229,17 @@ public class VisitorQueryService {
             String browser,
             String referrer,
             String sessionId,
+            BotFilter botFilter,
             boolean includeAdminTraffic,
             String excludedPathPrefix,
             int page,
             int size) {}
+
+    public enum BotFilter {
+        ALL,
+        EXCLUDE,
+        ONLY
+    }
 
     public record VisitorLogItem(
             String eventId,

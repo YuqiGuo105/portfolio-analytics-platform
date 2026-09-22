@@ -8,12 +8,14 @@ import org.springframework.web.bind.annotation.RequestParam;
 import org.springframework.web.bind.annotation.RestController;
 import org.springframework.web.server.ResponseStatusException;
 import site.yuqi.analytics.aggregator.service.VisitorQueryService;
+import site.yuqi.analytics.aggregator.service.VisitorQueryService.BotFilter;
 import site.yuqi.analytics.aggregator.service.VisitorQueryService.VisitorQuery;
 import site.yuqi.analytics.aggregator.service.VisitorQueryService.VisitorQueryResult;
 
 import java.time.Duration;
 import java.time.Instant;
 import java.time.format.DateTimeParseException;
+import java.util.Locale;
 
 /** Admin-only, bounded visitor-log query API. */
 @RestController
@@ -53,6 +55,7 @@ public class AdminVisitorsController {
             @RequestParam(required = false) String browser,
             @RequestParam(required = false) String referrer,
             @RequestParam(required = false) String sessionId,
+            @RequestParam(defaultValue = "ALL") String bot,
             @RequestParam(defaultValue = "false") boolean includeAdmin,
             @RequestParam(defaultValue = "0") int page,
             @RequestParam(defaultValue = "50") int size) {
@@ -83,6 +86,7 @@ public class AdminVisitorsController {
                 bounded(browser, 100, "browser"),
                 bounded(referrer, 512, "referrer"),
                 bounded(sessionId, 256, "sessionId"),
+                parseBotFilter(bot),
                 includeAdmin,
                 excludedPathPrefix,
                 page,
@@ -113,6 +117,15 @@ public class AdminVisitorsController {
             normalized = normalized.substring(0, normalized.length() - 1);
         }
         return normalized;
+    }
+
+    private static BotFilter parseBotFilter(String value) {
+        try {
+            return BotFilter.valueOf(String.valueOf(value).trim().toUpperCase(Locale.ROOT));
+        } catch (IllegalArgumentException exception) {
+            badRequest("bot must be ALL, EXCLUDE or ONLY");
+            return BotFilter.ALL;
+        }
     }
 
     private static void badRequest(String message) {

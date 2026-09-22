@@ -66,6 +66,7 @@ class VisitorQueryServiceTest {
                 null,
                 null,
                 null,
+                VisitorQueryService.BotFilter.ALL,
                 false,
                 "/admin",
                 0,
@@ -120,6 +121,7 @@ class VisitorQueryServiceTest {
                 null,
                 null,
                 null,
+                VisitorQueryService.BotFilter.ALL,
                 true,
                 "/admin",
                 0,
@@ -132,5 +134,39 @@ class VisitorQueryServiceTest {
         assertThat(sql.getValue()).doesNotContain(":excludedPathRoot", ":excludedPathChildren");
         assertThat(params.getValue().hasValue("excludedPathRoot")).isFalse();
         assertThat(params.getValue().hasValue("excludedPathChildren")).isFalse();
+    }
+
+    @SuppressWarnings({"unchecked", "rawtypes"})
+    @Test
+    void appliesBotClassificationToCountsSummaryAndItems() {
+        NamedParameterJdbcTemplate jdbc = mock(NamedParameterJdbcTemplate.class);
+        when(jdbc.queryForObject(anyString(), any(MapSqlParameterSource.class), eq(Long.class)))
+                .thenReturn(0L);
+        when(jdbc.queryForObject(anyString(), any(MapSqlParameterSource.class), any(RowMapper.class)))
+                .thenReturn(new VisitorSummary(0, 0, 0, 0));
+        when(jdbc.query(anyString(), any(MapSqlParameterSource.class), any(RowMapper.class)))
+                .thenReturn(List.of());
+        VisitorQueryService service = new VisitorQueryService(jdbc, new ObjectMapper());
+
+        service.query(new VisitorQuery(
+                "yuqi.site",
+                Instant.parse("2026-07-01T00:00:00Z"),
+                Instant.parse("2026-07-02T00:00:00Z"),
+                null, null, null, null, null, null, null, null, null,
+                VisitorQueryService.BotFilter.EXCLUDE,
+                false, "/admin", 0, 50));
+
+        ArgumentCaptor<String> countSql = ArgumentCaptor.forClass(String.class);
+        ArgumentCaptor<String> summarySql = ArgumentCaptor.forClass(String.class);
+        ArgumentCaptor<String> itemsSql = ArgumentCaptor.forClass(String.class);
+        verify(jdbc).queryForObject(
+                countSql.capture(), any(MapSqlParameterSource.class), eq(Long.class));
+        verify(jdbc).queryForObject(
+                summarySql.capture(), any(MapSqlParameterSource.class), any(RowMapper.class));
+        verify(jdbc).query(
+                itemsSql.capture(), any(MapSqlParameterSource.class), any(RowMapper.class));
+
+        assertThat(List.of(countSql.getValue(), summarySql.getValue(), itemsSql.getValue()))
+                .allMatch(statement -> statement.contains("and b.is_bot = false"));
     }
 }
