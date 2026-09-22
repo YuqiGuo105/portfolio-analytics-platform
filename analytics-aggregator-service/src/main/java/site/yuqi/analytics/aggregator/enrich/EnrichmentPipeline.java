@@ -85,7 +85,7 @@ public class EnrichmentPipeline {
     /** Pure enrichment — exposed for backfill which doesn't need parse/dedup. */
     public EnrichedEvent enrich(RawEvent raw) {
         UaParserService.Parsed ua = uaParser.parse(raw.uaRaw());
-        double botScore = botScorer.score(ua.deviceType(), raw.referrer());
+        double botScore = botScorer.score(ua.deviceType(), raw.referrer(), raw.properties());
         boolean isBot = botScorer.isBot(botScore);
         String ipHash = raw.ipHash() != null && !raw.ipHash().isBlank()
                 ? raw.ipHash()

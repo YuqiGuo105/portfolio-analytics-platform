@@ -9,6 +9,7 @@ import site.yuqi.analytics.common.event.GeoHint;
 import site.yuqi.analytics.common.event.RawEvent;
 
 import java.time.Instant;
+import java.util.Map;
 
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.mockito.ArgumentMatchers.anyString;
@@ -102,5 +103,27 @@ class EnrichmentPipelineTest {
         EnrichedEvent out = pipeline.enrich(raw);
         assertThat(out.eventId()).isEqualTo("vl:123");
         assertThat(out.geo().country()).isEqualTo("US");
+    }
+
+    @Test
+    void managedAssessmentFlowsThroughTheEnrichmentPipeline() {
+        RawEvent raw = new RawEvent(
+                "evt-managed", "yuqi.site", "page_view",
+                Instant.parse("2026-09-22T00:00:00Z"),
+                Instant.parse("2026-09-22T00:00:01Z"),
+                "session", "anon", "/", null, null,
+                "Mozilla/5.0", "203.0.113.10",
+                new GeoHint("US", "TX", "Dallas", null, null, "vercel"),
+                2, "granted", null,
+                Map.<String, Object>of(
+                        "botAssessmentProvider", "GOOGLE_RECAPTCHA_ENTERPRISE",
+                        "botAssessmentStatus", "VALID",
+                        "botAssessmentHumanScore", 0.1));
+
+        EnrichedEvent out = pipeline.enrich(raw);
+
+        assertThat(out.botScore()).isEqualTo(0.9);
+        assertThat(out.bot()).isTrue();
+        assertThat(out.properties()).containsEntry("botAssessmentHumanScore", 0.1);
     }
 }

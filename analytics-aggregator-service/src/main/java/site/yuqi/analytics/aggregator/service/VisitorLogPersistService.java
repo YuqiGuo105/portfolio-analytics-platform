@@ -36,7 +36,9 @@ public class VisitorLogPersistService {
     private static final Set<String> PROPERTY_ALLOWLIST = Set.of(
             "contentId", "contentType", "category", "progressPercent", "engagedSeconds",
             "component", "action", "campaign", "experimentId", "variant",
-            "recommendationRequestId", "rank", "modelVersion", "resultCount");
+            "recommendationRequestId", "rank", "modelVersion", "resultCount",
+            "botAssessmentProvider", "botAssessmentStatus", "botAssessmentHumanScore",
+            "botAssessmentReasons", "botAssessmentVerifiedBot", "botAssessmentVerifiedBotType");
 
     private static final String INSERT_RAW = """
             insert into analytics_private.behavior_events_raw
