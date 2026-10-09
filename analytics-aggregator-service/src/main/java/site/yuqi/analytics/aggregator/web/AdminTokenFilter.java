@@ -17,8 +17,6 @@ import java.security.MessageDigest;
 @Component
 public class AdminTokenFilter extends OncePerRequestFilter {
 
-    private static final String ADMIN_PREFIX = "/api/admin/";
-    private static final String INTERNAL_PREFIX = "/api/internal/";
     private static final String HEADER = "X-Internal-Token";
 
     private final String expected;
@@ -29,8 +27,10 @@ public class AdminTokenFilter extends OncePerRequestFilter {
 
     @Override
     protected boolean shouldNotFilter(@NonNull HttpServletRequest request) {
-        String path = request.getRequestURI();
-        return path == null || (!path.startsWith(ADMIN_PREFIX) && !path.startsWith(INTERNAL_PREFIX));
+        String path = canonicalPath(request);
+        boolean read = "GET".equals(request.getMethod()) || "HEAD".equals(request.getMethod());
+        return path != null && read && (under(path, "/api/public")
+                || under(path, "/actuator/health") || path.equals("/actuator/prometheus"));
     }
 
     @Override
@@ -38,6 +38,10 @@ public class AdminTokenFilter extends OncePerRequestFilter {
                                     @NonNull HttpServletResponse response,
                                     @NonNull FilterChain filterChain)
             throws ServletException, IOException {
+        if (canonicalPath(request) == null) {
+            writeError(response, HttpServletResponse.SC_BAD_REQUEST, "non-canonical request path");
+            return;
+        }
         if (expected.isEmpty()) {
             writeError(response, HttpServletResponse.SC_SERVICE_UNAVAILABLE, "admin token is not configured");
             return;
@@ -55,6 +59,23 @@ public class AdminTokenFilter extends OncePerRequestFilter {
         return MessageDigest.isEqual(
                 expected.getBytes(StandardCharsets.UTF_8),
                 actual.getBytes(StandardCharsets.UTF_8));
+    }
+
+    private static String canonicalPath(HttpServletRequest request) {
+        String path = request.getRequestURI();
+        if (path == null || !path.startsWith("/") || path.contains("%") || path.contains(";")
+                || path.contains("\\") || path.contains("//")
+                || path.chars().anyMatch(c -> c <= 32 || c == 127)) return null;
+        for (String segment : path.split("/")) {
+            if (segment.equals(".") || segment.equals("..")) return null;
+        }
+        String context = request.getContextPath();
+        return context != null && !context.isEmpty() && under(path, context)
+                ? path.substring(context.length()) : path;
+    }
+
+    private static boolean under(String path, String prefix) {
+        return path.equals(prefix) || path.startsWith(prefix + "/");
     }
 
     private static void writeError(HttpServletResponse response, int status, String message) throws IOException {

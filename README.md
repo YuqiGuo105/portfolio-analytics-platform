@@ -220,7 +220,18 @@ first if you need a fresh backfill.**
 
 ---
 
-## 6. Deploying to Render + Supabase
+## 6. Deployment
+
+The maintained release workflows deploy to Google Cloud Run:
+[`deploy-aggregator.yml`](.github/workflows/deploy-aggregator.yml) and
+[`deploy-alerts.yml`](.github/workflows/deploy-alerts.yml).
+The Render instructions below describe the legacy alternative, not the current
+release target. Use the deployed Cloud Run URL for `ANALYTICS_API_URL`.
+The current scale-to-zero configuration does not guarantee in-process scheduled
+jobs run while idle. Alert evaluation and retention need an authenticated
+external scheduler before promising wall-clock execution deadlines.
+
+### Legacy Render + Supabase setup
 
 ### 6.1 One-time provisioning
 
@@ -304,6 +315,6 @@ the Portfolio `/analytics` page. Exits non-zero on the first failure.
 │       └── web/                      # PublicVisitsController
 ├── analytics-alerts-service/         # Rule eval + incidents + notification fan-out
 ├── docker-compose.yml                # Local 2-service stack
-├── render.yaml                       # Production blueprint
+├── render.yaml                       # Legacy Render blueprint
 └── scripts/e2e-smoke.sh              # Post-deploy smoke test
 ```
