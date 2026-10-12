@@ -64,6 +64,28 @@ public class AdminVisitorsController {
                 device, browser, referrer, sessionId, bot, includeAdmin, page, size));
     }
 
+    @GetMapping("/visitor-visits")
+    public JsonNode visits(
+            @RequestParam(required = false) String from,
+            @RequestParam(required = false) String to,
+            @RequestParam(required = false) Integer hours,
+            @RequestParam(value = "q", required = false) String query,
+            @RequestParam(required = false) String event,
+            @RequestParam(required = false) String path,
+            @RequestParam(required = false) String country,
+            @RequestParam(required = false) String city,
+            @RequestParam(required = false) String device,
+            @RequestParam(required = false) String browser,
+            @RequestParam(required = false) String referrer,
+            @RequestParam(required = false) String sessionId,
+            @RequestParam(defaultValue = "ALL") String bot,
+            @RequestParam(defaultValue = "false") boolean includeAdmin,
+            @RequestParam(defaultValue = "0") int page,
+            @RequestParam(defaultValue = "50") int size) {
+        return queryService.visits(buildQuery(from, to, hours, query, event, path, country, city,
+                device, browser, referrer, sessionId, bot, includeAdmin, page, size));
+    }
+
     @GetMapping("/visitor-overview")
     public JsonNode overview(
             @RequestParam(required = false) String from,

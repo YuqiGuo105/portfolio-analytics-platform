@@ -36,6 +36,22 @@ public class VisitorQueryService {
     private final NamedParameterJdbcTemplate jdbc;
     private final ObjectMapper mapper;
 
+    /** Group reading checkpoints before pagination; never infer identity from an IP. */
+    @Transactional(readOnly = true, timeout = 8)
+    public JsonNode visits(VisitorQuery query) {
+        QueryParts parts = buildWhere(query);
+        parts.params().addValue("limit", query.size()).addValue("page", query.page())
+                .addValue("offset", (long) query.page() * query.size());
+        try {
+            String template = new ClassPathResource("queries/visitor-visits.sql")
+                    .getContentAsString(StandardCharsets.UTF_8);
+            return mapper.readTree(jdbc.queryForObject(
+                    template.replace("/* visitor_filters */", parts.fromAndWhere()), parts.params(), String.class));
+        } catch (IOException exception) {
+            throw new IllegalStateException("Visitor visits could not be decoded", exception);
+        }
+    }
+
     /** Full-window aggregates, never a sample of the paginated event list. */
     @Transactional(readOnly = true, timeout = 8)
     public JsonNode overview(VisitorQuery query) {

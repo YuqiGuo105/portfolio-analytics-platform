@@ -54,6 +54,21 @@ class AdminVisitorsControllerTest {
     }
 
     @Test
+    void visitGroupingRetainsSessionFilterAndQueryLimits() {
+        controller.visits("2026-10-11T00:00:00Z", "2026-10-12T00:00:00Z", null,
+                null, null, null, null, null, null, null, null, "sample-session", "ALL", false, 1, 25);
+        ArgumentCaptor<VisitorQuery> captor = ArgumentCaptor.forClass(VisitorQuery.class);
+        verify(service).visits(captor.capture());
+        assertThat(captor.getValue().sessionId()).isEqualTo("sample-session");
+        assertThat(captor.getValue().includeAdminTraffic()).isFalse();
+        assertThat(captor.getValue().siteId()).isEqualTo("yuqi.site");
+        assertThat(captor.getValue().page()).isEqualTo(1);
+        assertThatThrownBy(() -> controller.visits(null, null, 24,
+                null, null, null, null, null, null, null, null, null, "ALL", false, 0, 101))
+                .isInstanceOf(ResponseStatusException.class);
+    }
+
+    @Test
     void rejectsRangeBeyondRawRetentionWindow() {
         assertThatThrownBy(() -> controller.visitors(
                 "2026-01-01T00:00:00Z", "2026-03-15T00:00:00Z", null,

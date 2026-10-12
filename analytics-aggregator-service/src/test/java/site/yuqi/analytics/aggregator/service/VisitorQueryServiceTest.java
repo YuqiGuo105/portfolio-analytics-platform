@@ -24,6 +24,28 @@ import static org.mockito.Mockito.when;
 class VisitorQueryServiceTest {
 
     @Test
+    void groupsVisitsWithBoundedParameterizedFiltersBeforePagination() {
+        NamedParameterJdbcTemplate jdbc = mock(NamedParameterJdbcTemplate.class);
+        when(jdbc.queryForObject(anyString(), any(MapSqlParameterSource.class), eq(String.class)))
+                .thenReturn("{\"view\":\"visits\",\"items\":[],\"page\":{\"totalElements\":0}}");
+        VisitorQueryService service = new VisitorQueryService(jdbc, new ObjectMapper());
+        assertThat(service.visits(new VisitorQuery("yuqi.site",
+                Instant.parse("2026-10-11T00:00:00Z"), Instant.parse("2026-10-12T00:00:00Z"),
+                "x%' OR 1=1 --", null, null, null, null, null, null, null, "session-1",
+                VisitorQueryService.BotFilter.EXCLUDE, false, "/admin", 2, 25)).get("view").asText())
+                .isEqualTo("visits");
+        ArgumentCaptor<String> sql = ArgumentCaptor.forClass(String.class);
+        ArgumentCaptor<MapSqlParameterSource> params = ArgumentCaptor.forClass(MapSqlParameterSource.class);
+        verify(jdbc).queryForObject(sql.capture(), params.capture(), eq(String.class));
+        assertThat(sql.getValue()).contains("group by visit_key", "limit :limit offset :offset",
+                "r.site_id = :siteId", ":sessionId", ":query", ":excludedPathRoot", ":loopbackUrlPattern", "b.is_bot = false")
+                .doesNotContain("x%' OR 1=1 --", "/* visitor_filters */");
+        assertThat(params.getValue().getValue("offset")).isEqualTo(50L);
+        assertThat(params.getValue().getValue("limit")).isEqualTo(25);
+        assertThat(params.getValue().getValue("sessionId")).isEqualTo("session-1");
+    }
+
+    @Test
     void serializesVisitorTimestampsAsIso8601Strings() throws Exception {
         ObjectMapper mapper = new ObjectMapper().findAndRegisterModules();
         Instant timestamp = Instant.parse("2026-07-17T16:00:00Z");

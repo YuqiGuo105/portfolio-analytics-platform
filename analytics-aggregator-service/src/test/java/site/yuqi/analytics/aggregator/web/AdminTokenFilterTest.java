@@ -38,10 +38,11 @@ class AdminTokenFilterTest {
         verify(chain, never()).doFilter(request, response);
     }
 
-    @Test
-    void protectsAdminPathAndAcceptsMatchingToken() throws Exception {
+    @ParameterizedTest
+    @ValueSource(strings = {"/api/admin/visitors", "/api/admin/visitor-visits"})
+    void protectsAdminPathAndAcceptsMatchingToken(String path) throws Exception {
         AdminTokenFilter filter = new AdminTokenFilter("server-secret");
-        MockHttpServletRequest request = new MockHttpServletRequest("GET", "/api/admin/visitors");
+        MockHttpServletRequest request = new MockHttpServletRequest("GET", path);
         request.addHeader("X-Internal-Token", "server-secret");
         MockHttpServletResponse response = new MockHttpServletResponse();
         FilterChain chain = mock(FilterChain.class);
@@ -51,10 +52,11 @@ class AdminTokenFilterTest {
         verify(chain).doFilter(request, response);
     }
 
-    @Test
-    void rejectsMissingTokenOnAdminPath() throws Exception {
+    @ParameterizedTest
+    @ValueSource(strings = {"/api/admin/visitors", "/api/admin/visitor-visits"})
+    void rejectsMissingTokenOnAdminPath(String path) throws Exception {
         AdminTokenFilter filter = new AdminTokenFilter("server-secret");
-        MockHttpServletRequest request = new MockHttpServletRequest("GET", "/api/admin/visitors");
+        MockHttpServletRequest request = new MockHttpServletRequest("GET", path);
         MockHttpServletResponse response = new MockHttpServletResponse();
         FilterChain chain = mock(FilterChain.class);
 
