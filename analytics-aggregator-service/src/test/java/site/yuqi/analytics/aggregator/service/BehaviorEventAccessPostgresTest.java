@@ -75,7 +75,7 @@ class BehaviorEventAccessPostgresTest {
         flyway(null).migrate();
         flyway(null).validate();
 
-        var mapper = new ObjectMapper().findAndRegisterModules();
+        var mapper = new site.yuqi.analytics.aggregator.config.AggregatorBeansConfig().objectMapper();
         var cache = new ResponseCache(mock(StringRedisTemplate.class), mapper, false, 30, false, 5, 500, 40);
         var publicController = new PublicVisitsController(jdbc, cache);
         ReflectionTestUtils.setField(publicController, "siteId", "access-test");
@@ -201,6 +201,7 @@ class BehaviorEventAccessPostgresTest {
                 .andExpect(status().isUnauthorized());
         http.perform(get("/api/admin/visitor-overview").header("X-Internal-Token", "test-internal-token"))
                 .andExpect(status().isOk())
+                .andExpect(result -> assertThat(result.getResponse().getContentAsString()).contains("\"events\":1"))
                 .andExpect(jsonPath("$.summary.events").value(1))
                 .andExpect(jsonPath("$.summary.pageViews").value(1))
                 .andExpect(jsonPath("$.summary.sessions").value(1))
@@ -220,7 +221,9 @@ class BehaviorEventAccessPostgresTest {
             http.perform(get("/api/admin/visitor-overview")
                             .header("X-Internal-Token", "test-internal-token")
                             .param("from", from).param("to", to).param("bot", bot).param("path", "/project"))
-                    .andExpect(status().isOk()).andExpect(jsonPath("$.summary.events").value(expected));
+                    .andExpect(status().isOk())
+                    .andExpect(result -> assertThat(result.getResponse().getContentAsString()).contains("\"events\":" + expected))
+                    .andExpect(jsonPath("$.summary.events").value(expected));
             http.perform(get("/api/admin/visitors")
                             .header("X-Internal-Token", "test-internal-token")
                             .param("from", from).param("to", to).param("bot", bot).param("path", "/project")

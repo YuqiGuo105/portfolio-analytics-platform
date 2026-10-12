@@ -17,6 +17,21 @@ import static org.mockito.Mockito.*;
 
 class VisitorOverviewTest {
     @Test
+    void httpResponsePreservesAggregateKeys() throws Exception {
+        var jdbc = mock(NamedParameterJdbcTemplate.class);
+        when(jdbc.queryForObject(anyString(), any(MapSqlParameterSource.class), eq(String.class)))
+                .thenReturn("{\"summary\":{\"events\":150},\"timeline\":[]}");
+        var mapper = new site.yuqi.analytics.aggregator.config.AggregatorBeansConfig().objectMapper();
+        var controller = new AdminVisitorsController(new VisitorQueryService(jdbc, mapper),
+                "yuqi.site", 31, 100, "/admin");
+        var http = org.springframework.test.web.servlet.setup.MockMvcBuilders.standaloneSetup(controller).build();
+        var result = http.perform(org.springframework.test.web.servlet.request.MockMvcRequestBuilders
+                .get("/api/admin/visitor-overview")).andReturn();
+        assertThat(result.getResponse().getStatus()).isEqualTo(200);
+        assertThat(result.getResponse().getContentAsString()).contains("\"events\":150");
+    }
+
+    @Test
     void overviewUsesAllFiltersWithoutPaginationAndKeepsSqlParameterized() throws Exception {
         var jdbc = mock(NamedParameterJdbcTemplate.class);
         when(jdbc.queryForObject(anyString(), any(MapSqlParameterSource.class), eq(String.class)))
@@ -34,7 +49,7 @@ class VisitorOverviewTest {
         assertThat(sql.getValue()).doesNotContain("OR 1=1", ":limit", ":offset", "/* visitor_filters */");
         assertThat(params.getValue().getValue("bucket")).isEqualTo("day");
         assertThat(params.getValue().getValue("country")).isEqualTo("in");
-        assertThat(result).containsKey("summary");
+        assertThat(result.has("summary")).isTrue();
         var transaction = VisitorQueryService.class.getMethod("overview", VisitorQuery.class).getAnnotation(Transactional.class);
         assertThat(transaction.readOnly()).isTrue();
         assertThat(transaction.timeout()).isEqualTo(8);

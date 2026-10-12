@@ -3,6 +3,7 @@ package site.yuqi.analytics.aggregator.service;
 import com.fasterxml.jackson.core.type.TypeReference;
 import com.fasterxml.jackson.annotation.JsonFormat;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import com.fasterxml.jackson.databind.JsonNode;
 import lombok.RequiredArgsConstructor;
 import org.springframework.jdbc.core.namedparam.MapSqlParameterSource;
 import org.springframework.jdbc.core.namedparam.NamedParameterJdbcTemplate;
@@ -37,7 +38,7 @@ public class VisitorQueryService {
 
     /** Full-window aggregates, never a sample of the paginated event list. */
     @Transactional(readOnly = true, timeout = 8)
-    public Map<String, Object> overview(VisitorQuery query) {
+    public JsonNode overview(VisitorQuery query) {
         QueryParts parts = buildWhere(query);
         String bucket = Duration.between(query.from(), query.to()).compareTo(Duration.ofHours(24)) <= 0 ? "hour" : "day";
         parts.params().addValue("bucket", bucket);
@@ -46,7 +47,8 @@ public class VisitorQueryService {
                     .getContentAsString(StandardCharsets.UTF_8);
             String json = jdbc.queryForObject(template.replace("/* visitor_filters */", parts.fromAndWhere()),
                     parts.params(), String.class);
-            return mapper.readValue(json, MAP_TYPE);
+            // Preserve nested JSON independently of auto-registered collection modules.
+            return mapper.readTree(json);
         } catch (IOException exception) {
             throw new IllegalStateException("Visitor overview could not be decoded", exception);
         }

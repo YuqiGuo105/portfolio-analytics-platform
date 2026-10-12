@@ -16,7 +16,7 @@ import java.time.Duration;
 import java.time.Instant;
 import java.time.format.DateTimeParseException;
 import java.util.Locale;
-import java.util.Map;
+import com.fasterxml.jackson.databind.JsonNode;
 
 /** Admin-only, bounded visitor-log query API. */
 @RestController
@@ -65,7 +65,7 @@ public class AdminVisitorsController {
     }
 
     @GetMapping("/visitor-overview")
-    public Map<String, Object> overview(
+    public JsonNode overview(
             @RequestParam(required = false) String from,
             @RequestParam(required = false) String to,
             @RequestParam(required = false) Integer hours,
