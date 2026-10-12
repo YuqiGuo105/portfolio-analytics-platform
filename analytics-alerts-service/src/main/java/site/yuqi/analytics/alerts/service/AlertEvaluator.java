@@ -185,7 +185,10 @@ public class AlertEvaluator {
             throw new IllegalArgumentException("Replay requires an enabled positive-threshold >= rule");
         }
         // A fixed range makes retries stable and prevents a missed week from generating an email flood.
-        List<ReplayBucket> matches = jdbc.query("""
+        List<ReplayBucket> matches = rule.filters().hasReferrer()
+                ? SourceFilteredMeasurements.replay(jdbc, rule, from, to).stream()
+                    .map(value -> new ReplayBucket(value.time(), value.measured())).toList()
+                : jdbc.query("""
                 select bucket_time, sum(event_count) as measured
                 from geo_time_rollups
                 where site_id = ? and granularity = ? and event_type = ?
@@ -255,6 +258,7 @@ public class AlertEvaluator {
     }
 
     long countMatching(AlertRule r, Instant bucket) {
+        if (r.filters().hasReferrer()) return SourceFilteredMeasurements.count(jdbc, List.of(r), bucket).getOrDefault(r.ruleId(), 0L);
         String sql = """
                 select coalesce(sum(event_count), 0)
                 from geo_time_rollups
@@ -276,6 +280,12 @@ public class AlertEvaluator {
 
     Map<Long, Long> countMatchingBatch(List<AlertRule> batch, Instant bucket) {
         if (batch.isEmpty()) return Map.of();
+        List<AlertRule> sourceRules = batch.stream().filter(rule -> rule.filters().hasReferrer()).toList();
+        if (!sourceRules.isEmpty()) {
+            Map<Long, Long> combined = new HashMap<>(SourceFilteredMeasurements.count(jdbc, sourceRules, bucket));
+            combined.putAll(countMatchingBatch(batch.stream().filter(rule -> !rule.filters().hasReferrer()).toList(), bucket));
+            return combined;
+        }
         String values = batch.stream().map(ignored -> "(?, ?, ?, ?, ?, ?, ?)")
                 .collect(Collectors.joining(", "));
         String sql = """

@@ -72,7 +72,7 @@ public class VisitorIntelligenceService {
                 Map.entry("ruleName", rule.name()), Map.entry("matched", matched),
                 Map.entry("measured", measured), Map.entry("comparator", rule.comparator()),
                 Map.entry("threshold", rule.threshold()), Map.entry("bucket", bucket),
-                Map.entry("filters", Map.of("bot", rule.filters().bot().name())),
+                Map.entry("filters", rule.filters().asMap()),
                 Map.entry("trafficClassification", "Aggregator is_bot classification; not proof of a human visitor"),
                 Map.entry("dimensions", Map.of("siteId", rule.siteId(), "eventType", rule.eventType(),
                         "geoLevel", rule.geoLevel(), "geoAreaId", rule.geoAreaId() == null ? "" : rule.geoAreaId(),

@@ -18,6 +18,7 @@ create table alert_rules (
     cooldown_seconds  integer not null default 1800,
     enabled           boolean not null default true,
     bot_filter        varchar(16) not null default 'ALL' check (bot_filter in ('ALL', 'EXCLUDE', 'ONLY')),
+    referrer_domain   varchar(253) not null default '',
     version           integer not null default 1,
     created_at        timestamp not null default current_timestamp,
     updated_at        timestamp not null default current_timestamp

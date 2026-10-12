@@ -34,7 +34,7 @@ public class AlertRuleRepository {
             rs.getInt("cooldown_seconds"),
             rs.getBoolean("enabled"),
             rs.getInt("version"),
-            new AlertRuleFilters(AlertRuleFilters.Bot.valueOf(rs.getString("bot_filter"))));
+            new AlertRuleFilters(AlertRuleFilters.Bot.valueOf(rs.getString("bot_filter")), rs.getString("referrer_domain")));
 
     public List<AlertRule> findAll() {
         return jdbc.query("select * from alert_rules order by rule_id", MAPPER);
@@ -56,7 +56,7 @@ public class AlertRuleRepository {
         SimpleJdbcInsert ins = new SimpleJdbcInsert(dataSource)
                 .withTableName("alert_rules")
                 .usingColumns("site_id", "name", "event_type", "geo_level", "geo_area_id",
-                        "granularity", "threshold", "comparator", "cooldown_seconds", "enabled", "bot_filter")
+                        "granularity", "threshold", "comparator", "cooldown_seconds", "enabled", "bot_filter", "referrer_domain")
                 .usingGeneratedKeyColumns("rule_id");
         Number id = ins.executeAndReturnKey(Map.ofEntries(
                 Map.entry("site_id", r.siteId()),
@@ -69,7 +69,8 @@ public class AlertRuleRepository {
                 Map.entry("comparator", r.comparator()),
                 Map.entry("cooldown_seconds", r.cooldownSeconds()),
                 Map.entry("enabled", enabled),
-                Map.entry("bot_filter", r.filters() == null ? "ALL" : r.filters().bot().name())
+                Map.entry("bot_filter", r.filters() == null ? "ALL" : r.filters().bot().name()),
+                Map.entry("referrer_domain", r.filters() == null || !r.filters().hasReferrer() ? "" : r.filters().referrerDomain())
         ));
         return findById(id.longValue()).orElseThrow();
     }
@@ -80,6 +81,7 @@ public class AlertRuleRepository {
                     site_id = ?, name = ?, event_type = ?, geo_level = ?, geo_area_id = ?,
                     granularity = ?, threshold = ?, comparator = ?, cooldown_seconds = ?,
                     bot_filter = coalesce(?, bot_filter),
+                    referrer_domain = coalesce(?, referrer_domain),
                     version = version + 1, updated_at = now()
                 where rule_id = ?
                 """,
@@ -87,6 +89,7 @@ public class AlertRuleRepository {
                 r.geoAreaId() == null ? "" : r.geoAreaId(),
                 r.granularity(), r.threshold(), r.comparator(), r.cooldownSeconds(),
                 r.filters() == null ? null : r.filters().bot().name(),
+                r.filters() == null ? null : r.filters().referrerDomain(),
                 id);
         return rows == 0 ? Optional.empty() : findById(id);
     }
@@ -113,13 +116,15 @@ public class AlertRuleRepository {
                     granularity = ?, threshold = ?, comparator = ?, cooldown_seconds = ?,
                     enabled = coalesce(?, enabled),
                     bot_filter = coalesce(?, bot_filter),
+                    referrer_domain = coalesce(?, referrer_domain),
                     version = version + 1, updated_at = now()
                 where rule_id = ? and version = ?
                 """,
                 r.siteId(), r.name(), r.eventType(), r.geoLevel(),
                 r.geoAreaId() == null ? "" : r.geoAreaId(),
                 r.granularity(), r.threshold(), r.comparator(), r.cooldownSeconds(),
-                enabled, r.filters() == null ? null : r.filters().bot().name(), id, expectedVersion);
+                enabled, r.filters() == null ? null : r.filters().bot().name(),
+                r.filters() == null ? null : r.filters().referrerDomain(), id, expectedVersion);
         if (rows == 0) return Optional.empty();
         return findById(id);
     }

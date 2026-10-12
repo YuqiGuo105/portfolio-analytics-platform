@@ -193,7 +193,7 @@ public class AlertRuleChangeService {
                 after.put("comparator", patch.comparator() != null ? patch.comparator() : ">=");
                 after.put("cooldownSeconds", patch.cooldownSeconds() != null ? patch.cooldownSeconds() : 1800);
                 after.put("enabled", patch.enabled() == null || patch.enabled());
-                after.put("filters", Map.of("bot", patch.filters() == null ? "ALL" : patch.filters().bot().name()));
+                after.put("filters", patch.filters() == null ? Map.of("bot", "ALL") : patch.filters().asMap());
             }
             case "UPDATE" -> {
                 if (before != null) after.putAll(ruleToMap(before));
@@ -207,7 +207,7 @@ public class AlertRuleChangeService {
                 if (patch.comparator() != null) after.put("comparator", patch.comparator());
                 if (patch.cooldownSeconds() != null) after.put("cooldownSeconds", patch.cooldownSeconds());
                 if (patch.enabled() != null) after.put("enabled", patch.enabled());
-                if (patch.filters() != null) after.put("filters", Map.of("bot", patch.filters().bot().name()));
+                if (patch.filters() != null) after.put("filters", patch.filters().mergedWith(before == null ? null : before.filters()).asMap());
             }
             case "SET_ENABLED" -> {
                 if (before != null) after.putAll(ruleToMap(before));

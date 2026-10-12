@@ -84,6 +84,7 @@ class AlertPostgresTest {
                 """);
         jdbc.execute("alter table geo_time_rollups add column if not exists is_bot boolean default false");
         jdbc.execute("alter table behavior_events add column if not exists is_bot boolean default false");
+        jdbc.execute("alter table behavior_events add column if not exists referrer_domain text default ''");
         incidents = new AlertIncidentRepository(jdbc);
         rules = new AlertRuleRepository(jdbc, ds);
         notificationServer = HttpServer.create(new InetSocketAddress("127.0.0.1", 0), 0);
@@ -132,6 +133,28 @@ class AlertPostgresTest {
     @Test
     void emptyRetryQueueExecutesWithoutPostgresTypeError() {
         assertThat(incidents.claimPendingNotifications(Instant.now(), 3, 120)).isEmpty();
+    }
+
+    @Test
+    void sourceFilteredBatchReplayAndNotificationUseTheSameFrozenPolicy() {
+        Instant bucket = Granularity.FIVE_MIN.floor(Instant.now()).minusSeconds(600);
+        AlertRule source = rules.insert(new AlertRuleRequest("alerts-test", "LinkedIn Texas", "page_view", "REGION",
+                "REGION:US:TX", "5m", 1, ">=", 1800, new AlertRuleFilters(AlertRuleFilters.Bot.EXCLUDE, "linkedin.com")));
+        for (String id : List.of("matching", "bot-source", "other-source", "next-bucket")) {
+            jdbc.update("""
+                insert into behavior_events(event_id,site_id,event_name,event_time,server_time,page_path,country,region,referrer_domain,is_bot)
+                values (?, 'alerts-test','page_view',?,?,'/mcp-guide','US','TX',?,?)
+                """, id, Timestamp.from(bucket.plusSeconds(id.equals("next-bucket") ? 300 : 1)),
+                    Timestamp.from(bucket.plusSeconds(2)), id.equals("other-source") ? "linkedin.com.evil.test" : "linkedin.com",
+                    id.equals("bot-source"));
+        }
+        assertThat(evaluator.countMatching(source, bucket)).isEqualTo(1);
+        assertThat(evaluator.countMatchingBatch(List.of(source, rule), bucket)).containsEntry(source.ruleId(), 1L).containsEntry(rule.ruleId(), 0L);
+        assertThat(evaluator.replay(source.ruleId(), bucket, bucket.plusSeconds(300))).isTrue();
+        assertThat(requests).hasSize(1);
+        assertThat(requests.getFirst()).contains("matching").doesNotContain("bot-source", "other-source", "next-bucket");
+        assertThat(evaluator.replay(source.ruleId(), bucket, bucket.plusSeconds(300))).isTrue();
+        assertThat(requests).hasSize(1);
     }
 
     @Test
