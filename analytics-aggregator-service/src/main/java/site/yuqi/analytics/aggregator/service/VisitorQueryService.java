@@ -7,11 +7,16 @@ import lombok.RequiredArgsConstructor;
 import org.springframework.jdbc.core.namedparam.MapSqlParameterSource;
 import org.springframework.jdbc.core.namedparam.NamedParameterJdbcTemplate;
 import org.springframework.stereotype.Service;
+import org.springframework.core.io.ClassPathResource;
+import org.springframework.transaction.annotation.Transactional;
 
+import java.io.IOException;
+import java.nio.charset.StandardCharsets;
 import java.sql.ResultSet;
 import java.sql.SQLException;
 import java.sql.Timestamp;
 import java.time.Instant;
+import java.time.Duration;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
@@ -29,6 +34,23 @@ public class VisitorQueryService {
 
     private final NamedParameterJdbcTemplate jdbc;
     private final ObjectMapper mapper;
+
+    /** Full-window aggregates, never a sample of the paginated event list. */
+    @Transactional(readOnly = true, timeout = 8)
+    public Map<String, Object> overview(VisitorQuery query) {
+        QueryParts parts = buildWhere(query);
+        String bucket = Duration.between(query.from(), query.to()).compareTo(Duration.ofHours(24)) <= 0 ? "hour" : "day";
+        parts.params().addValue("bucket", bucket);
+        try {
+            String template = new ClassPathResource("queries/visitor-overview.sql")
+                    .getContentAsString(StandardCharsets.UTF_8);
+            String json = jdbc.queryForObject(template.replace("/* visitor_filters */", parts.fromAndWhere()),
+                    parts.params(), String.class);
+            return mapper.readValue(json, MAP_TYPE);
+        } catch (IOException exception) {
+            throw new IllegalStateException("Visitor overview could not be decoded", exception);
+        }
+    }
 
     public VisitorQueryResult query(VisitorQuery query) {
         QueryParts parts = buildWhere(query);

@@ -16,6 +16,7 @@ import java.time.Duration;
 import java.time.Instant;
 import java.time.format.DateTimeParseException;
 import java.util.Locale;
+import java.util.Map;
 
 /** Admin-only, bounded visitor-log query API. */
 @RestController
@@ -59,6 +60,33 @@ public class AdminVisitorsController {
             @RequestParam(defaultValue = "false") boolean includeAdmin,
             @RequestParam(defaultValue = "0") int page,
             @RequestParam(defaultValue = "50") int size) {
+        return queryService.query(buildQuery(from, to, hours, query, event, path, country, city,
+                device, browser, referrer, sessionId, bot, includeAdmin, page, size));
+    }
+
+    @GetMapping("/visitor-overview")
+    public Map<String, Object> overview(
+            @RequestParam(required = false) String from,
+            @RequestParam(required = false) String to,
+            @RequestParam(required = false) Integer hours,
+            @RequestParam(value = "q", required = false) String query,
+            @RequestParam(required = false) String event,
+            @RequestParam(required = false) String path,
+            @RequestParam(required = false) String country,
+            @RequestParam(required = false) String city,
+            @RequestParam(required = false) String device,
+            @RequestParam(required = false) String browser,
+            @RequestParam(required = false) String referrer,
+            @RequestParam(required = false) String sessionId,
+            @RequestParam(defaultValue = "ALL") String bot,
+            @RequestParam(defaultValue = "false") boolean includeAdmin) {
+        return queryService.overview(buildQuery(from, to, hours, query, event, path, country, city,
+                device, browser, referrer, sessionId, bot, includeAdmin, 0, 1));
+    }
+
+    private VisitorQuery buildQuery(String from, String to, Integer hours, String query, String event,
+            String path, String country, String city, String device, String browser, String referrer,
+            String sessionId, String bot, boolean includeAdmin, int page, int size) {
         if (page < 0 || page > 10_000) badRequest("page must be between 0 and 10000");
         if (size < 1 || size > maxPageSize) badRequest("size must be between 1 and " + maxPageSize);
 
@@ -73,7 +101,7 @@ public class AdminVisitorsController {
             badRequest("query range exceeds " + maxRangeDays + " days");
         }
 
-        return queryService.query(new VisitorQuery(
+        return new VisitorQuery(
                 siteId,
                 start,
                 end,
@@ -90,7 +118,7 @@ public class AdminVisitorsController {
                 includeAdmin,
                 excludedPathPrefix,
                 page,
-                size));
+                size);
     }
 
     private static Instant parseInstant(String value, Instant fallback, String name) {

@@ -193,4 +193,39 @@ class BehaviorEventAccessPostgresTest {
                 .andExpect(status().isOk()).andExpect(jsonPath("$.items[0].eventId").value("access-event"))
                 .andExpect(jsonPath("$.items[0].browser").value("Chrome"));
     }
+
+    @Test
+    void overviewRequiresAuthenticationAndReturnsOnlyAggregates() throws Exception {
+        http.perform(get("/api/admin/visitor-overview")).andExpect(status().isUnauthorized());
+        http.perform(get("/api/admin/visitor-overview").header("X-Internal-Token", "wrong"))
+                .andExpect(status().isUnauthorized());
+        http.perform(get("/api/admin/visitor-overview").header("X-Internal-Token", "test-internal-token"))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.summary.events").value(1))
+                .andExpect(jsonPath("$.summary.pageViews").value(1))
+                .andExpect(jsonPath("$.summary.sessions").value(1))
+                .andExpect(jsonPath("$.summary.likelyPeople").value(1))
+                .andExpect(jsonPath("$.rankings.pages[0].value").value("/project"))
+                .andExpect(content().string(org.hamcrest.Matchers.not(org.hamcrest.Matchers.containsString("private=value"))))
+                .andExpect(content().string(org.hamcrest.Matchers.not(org.hamcrest.Matchers.containsString("192.0.2.1"))))
+                .andExpect(content().string(org.hamcrest.Matchers.not(org.hamcrest.Matchers.containsString("access-session"))));
+    }
+
+    @Test
+    void overviewAndRecordsUseTheSameWindowAndBotFilters() throws Exception {
+        String from = Instant.now().minusSeconds(3600).toString();
+        String to = Instant.now().toString();
+        for (String bot : List.of("ALL", "EXCLUDE", "ONLY")) {
+            int expected = bot.equals("ONLY") ? 0 : 1;
+            http.perform(get("/api/admin/visitor-overview")
+                            .header("X-Internal-Token", "test-internal-token")
+                            .param("from", from).param("to", to).param("bot", bot).param("path", "/project"))
+                    .andExpect(status().isOk()).andExpect(jsonPath("$.summary.events").value(expected));
+            http.perform(get("/api/admin/visitors")
+                            .header("X-Internal-Token", "test-internal-token")
+                            .param("from", from).param("to", to).param("bot", bot).param("path", "/project")
+                            .param("size", "1"))
+                    .andExpect(status().isOk()).andExpect(jsonPath("$.page.totalElements").value(expected));
+        }
+    }
 }
