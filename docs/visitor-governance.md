@@ -189,6 +189,14 @@ on the fixed-target, site-scoped SECURITY DEFINER purge function with a fixed
 search_path. Every nonempty function purge appends `purge_receipts`, `purge_batches`
 or `purge_audit` with its count in the same transaction. Owner/superuser statements
 can bypass application auditing or alter/disable these controls; this is not WORM.
+V17 fixes `search_path = pg_catalog, analytics_private` on the seven other
+governance functions without changing applied V16, function bodies or privileges.
+The purge function already had that setting. PostgreSQL regressions exercise the
+V16-to-V17 upgrade, function metadata, and transition-table delete bounds on all
+three governance tables, including a same-named caller temporary table.
+Local V17 verification on 2026-11-10: the focused command below passed 93 tests
+(33 governance PostgreSQL, 10 existing PostgreSQL access, 50 other), with no skips
+or failures on PostgreSQL 18.6. Production advisor clearance was not checked here.
 For existing Visitors reads the proxy may provide `X-Admin-Action` from the fixed
 allowlist `visitor_read`/`visitor_export` (default visitor_read), UUID
 `X-Admin-Request-Id` and `X-Admin-Export-Format` csv/json. Valid correlation/format

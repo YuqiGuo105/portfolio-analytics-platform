@@ -91,6 +91,8 @@ class GovernancePostgresTest {
         jdbc.execute("create table public.\"Blogs\" (id text primary key, title text)");
         jdbc.execute("create table public.life_blogs (id text primary key, updated_at timestamptz)");
         jdbc.execute("create table public.experience (id text primary key, name text)");
+        Flyway.configure().dataSource(ds).table("analytics_aggregator_flyway_history")
+                .baselineOnMigrate(true).baselineVersion("0").target("16").load().migrate();
         Flyway flyway = Flyway.configure().dataSource(ds).table("analytics_aggregator_flyway_history")
                 .baselineOnMigrate(true).baselineVersion("0").load();
         flyway.migrate();
@@ -504,6 +506,74 @@ class GovernancePostgresTest {
         assertThat(jdbc.queryForObject("select held from analytics_private.visitor_evidence_batches", Boolean.class)).isFalse();
         assertThat(jdbc.queryForObject("select status from analytics_private.visitor_evidence_batches", String.class)).isEqualTo("archived");
         assertThat(jdbc.queryForObject("select canonical_evidence from analytics_private.visitor_evidence_receipts", String.class)).isNotNull();
+    }
+
+    @Test
+    void governanceFunctionsHaveFixedSearchPathsAfterV16Upgrade() {
+        for (String signature : List.of("reject_governance_audit_mutation()",
+                "capture_visitor_receipt_metadata()", "check_governance_delete()",
+                "check_governance_delete_bound()", "stamp_governance_expiry()",
+                "visitor_evidence_v1(public.behavior_events,text)",
+                "visitor_receipt_capture_v1(analytics_private.visitor_evidence_receipts)",
+                "purge_visitor_governance(text,text,integer)")) {
+            assertThat(jdbc.queryForObject("""
+                    select 'search_path=pg_catalog, analytics_private' = any(proconfig)
+                    from pg_catalog.pg_proc where oid = ?::regprocedure
+                    """, Boolean.class, "analytics_private." + signature)).as(signature).isTrue();
+            assertThat(jdbc.queryForObject("""
+                    select prosecdef from pg_catalog.pg_proc where oid = ?::regprocedure
+                    """, Boolean.class, "analytics_private." + signature)).as(signature)
+                    .isEqualTo(signature.startsWith("purge_visitor_governance("));
+        }
+    }
+
+    @ParameterizedTest
+    @ValueSource(strings = {"receipts", "batches", "audit"})
+    void fixedSearchPathPreservesTransitionTableDeleteBounds(String target) throws Exception {
+        String table;
+        String key;
+        switch (target) {
+            case "receipts" -> {
+                seedExpiredReceipts(501, 181, "governance-test");
+                table = "visitor_evidence_receipts";
+                key = "receipt_id";
+            }
+            case "batches" -> {
+                jdbc.execute("""
+                        insert into analytics_private.visitor_evidence_batches(batch_id,site_id,created_at,
+                            expires_at,receipt_count,manifest_sha256,status,expired_at)
+                        select gen_random_uuid(),'governance-test',now()-interval '300 days',
+                            now()-interval '210 days',1,repeat('a',64),'expired',now()-interval '181 days'
+                        from generate_series(1,501)
+                        """);
+                table = "visitor_evidence_batches";
+                key = "batch_id";
+            }
+            case "audit" -> {
+                seedOldAudit(501);
+                table = "visitor_governance_audit";
+                key = "audit_id";
+            }
+            default -> throw new IllegalArgumentException("Unexpected test target");
+        }
+        try (var connection = ds.getConnection(); var statement = connection.createStatement()) {
+            statement.execute("set search_path = public");
+            // The trigger must read its transition rows, not a same-named caller relation.
+            statement.execute("create temporary table deleted_rows (id integer)");
+            var rejected = Assertions.assertThrows(java.sql.SQLException.class,
+                    () -> statement.executeUpdate("delete from analytics_private." + table));
+            assertThat(rejected.getSQLState()).isEqualTo("22023");
+            assertThat(rejected.getMessage()).contains("governance purge exceeds 500 rows");
+            assertThat(count(table)).isEqualTo(501);
+            assertThat(statement.executeUpdate("delete from analytics_private." + table + " where " + key
+                    + " in (select " + key + " from analytics_private." + table + " order by " + key + " limit 500)"))
+                    .isEqualTo(500);
+        }
+        assertThat(count(table)).isEqualTo(1);
+        assertThat(purge(target, 500)).isEqualTo(1);
+        assertThat(jdbc.queryForObject("""
+                select affected_count from analytics_private.visitor_governance_audit where action=?
+                """, Integer.class, "purge_" + target)).isEqualTo(1);
     }
 
     @Test
