@@ -91,6 +91,12 @@ springdoc:
     path: /swagger-ui.html
 
 analytics:
+  governance:
+    enabled: ${ANALYTICS_GOVERNANCE_ENABLED:false}
+    scheduled-archive-enabled: ${ANALYTICS_GOVERNANCE_SCHEDULED_ARCHIVE_ENABLED:false}
+    worker-interval-seconds: ${ANALYTICS_GOVERNANCE_WORKER_INTERVAL_SECONDS:3600}
+    receipt-retention-days: ${ANALYTICS_GOVERNANCE_RECEIPT_RETENTION_DAYS:90}
+    archive-retention-days: ${ANALYTICS_GOVERNANCE_ARCHIVE_RETENTION_DAYS:90}
   operations:
     ingest-url: ${OPERATIONS_INGEST_URL:}
     internal-token: ${INTERNAL_API_TOKEN:}

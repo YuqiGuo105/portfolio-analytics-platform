@@ -11,6 +11,7 @@ import org.springframework.transaction.annotation.Transactional;
 import site.yuqi.analytics.common.event.EnrichedEvent;
 import site.yuqi.analytics.common.event.GeoHint;
 import site.yuqi.analytics.common.event.RawEvent;
+import site.yuqi.analytics.aggregator.governance.EvidenceReceiptWriter;
 
 import java.net.URI;
 import java.sql.PreparedStatement;
@@ -69,6 +70,7 @@ public class VisitorLogPersistService {
 
     private final JdbcTemplate jdbc;
     private final ObjectMapper mapper;
+    private final EvidenceReceiptWriter evidenceReceipts;
 
     @Transactional
     public void persistBatch(List<RawEvent> rawEvents, List<EnrichedEvent> enrichedEvents) {
@@ -81,6 +83,7 @@ public class VisitorLogPersistService {
         persistRaw(raw);
         persistFacts(facts);
         persistLegacy(facts);
+        evidenceReceipts.append(facts);
         log.info("{\"event\":\"behavior_batch_insert\",\"raw\":{},\"facts\":{}}", raw.size(), facts.size());
     }
 

@@ -104,7 +104,9 @@ class BehaviorEventAccessPostgresTest {
         var enriched = new EnrichedEvent("access-event", "access-test", "page_view", time, time,
                 "access-session", "hashed-anon", raw.pageUrl(), null, null,
                 "desktop", "Chrome", "test-os", false, 0, "hashed-ip", null);
-        var writer = new VisitorLogPersistService(jdbc, new ObjectMapper());
+        var writer = new VisitorLogPersistService(jdbc, new ObjectMapper(),
+                new site.yuqi.analytics.aggregator.governance.EvidenceReceiptWriter(jdbc,
+                        new site.yuqi.analytics.aggregator.governance.GovernancePolicy(false, false, 90, 90, "access-test")));
         new TransactionTemplate(new DataSourceTransactionManager(ds)).executeWithoutResult(status -> {
             writer.persistBatch(List.of(raw), List.of(enriched));
             writer.persistBatch(List.of(raw), List.of(enriched));
