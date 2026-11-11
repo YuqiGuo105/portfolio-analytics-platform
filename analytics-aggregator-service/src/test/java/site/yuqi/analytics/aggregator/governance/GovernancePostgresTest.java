@@ -226,7 +226,7 @@ class GovernancePostgresTest {
         assertThat(bundle.path("canonicalManifest").asText()).isEqualTo(EvidenceCodec.canonical(bundle.path("manifest")));
         assertThat(service.export(null, id).canonicalManifest()).isEqualTo(bundle.path("canonicalManifest").asText());
         assertThat(exported).doesNotContain("private@example.test", "192.0.2.1", "private-session", "private-ua", "secret");
-        Files.writeString(Path.of("/private/tmp/visitor-governance-backend-evidence.json"), exported);
+        Files.writeString(Path.of("target", "visitor-governance-backend-evidence.json"), exported);
         assertThat(service.archive(null, 100).status()).isEqualTo("empty");
     }
 
@@ -257,7 +257,7 @@ class GovernancePostgresTest {
             assertThat(exported.headers().firstValue("cache-control")).contains("no-store");
             var bundle = EvidenceCodec.parse(exported.body());
             assertThat(bundle.path("manifestSha256").asText()).isEqualTo(EvidenceCodec.sha256(bundle.path("canonicalManifest").asText()));
-            Files.writeString(Path.of("/private/tmp/visitor-governance-backend-evidence.json"), exported.body());
+            Files.writeString(Path.of("target", "visitor-governance-backend-evidence.json"), exported.body());
             assertThat(EvidenceCodec.parse(send(client, base + "/hold", "DELETE", hold, true).body())
                     .at("/batch/held").asBoolean()).isFalse();
             assertThat(EvidenceCodec.parse(send(client, base + "/overview", "GET", null, true).body())
