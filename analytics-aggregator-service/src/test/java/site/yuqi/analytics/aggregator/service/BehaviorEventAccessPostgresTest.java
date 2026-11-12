@@ -18,14 +18,18 @@ import org.springframework.transaction.support.TransactionTemplate;
 import site.yuqi.analytics.aggregator.web.*;
 import site.yuqi.analytics.common.event.EnrichedEvent;
 import site.yuqi.analytics.common.event.RawEvent;
+import site.yuqi.analytics.aggregator.kafka.RawEventEnvelope;
 
 import java.sql.SQLException;
 import java.time.Instant;
 import java.util.List;
+import java.util.Map;
 
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.doThrow;
+import static org.mockito.ArgumentMatchers.anyList;
 import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.get;
 import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.*;
 
@@ -97,6 +101,7 @@ class BehaviorEventAccessPostgresTest {
     @BeforeEach
     void seed() {
         jdbc.execute("truncate behavior_events, analytics_private.behavior_events_raw, visitor_logs restart identity");
+        jdbc.execute("truncate analytics_kafka_inbox, analytics_visit_throttle");
         Instant time = Instant.now().minusSeconds(60);
         var raw = new RawEvent("access-event", "access-test", "page_view", time, time,
                 "access-session", "access-anon", "https://example.test/project?private=value",
@@ -111,6 +116,94 @@ class BehaviorEventAccessPostgresTest {
             writer.persistBatch(List.of(raw), List.of(enriched));
             writer.persistBatch(List.of(raw), List.of(enriched));
         });
+    }
+
+    private KafkaEventBatchProcessor deliveryProcessor(SessionAggregatorService sessions) {
+        var mapper = new site.yuqi.analytics.aggregator.config.AggregatorBeansConfig().objectMapper();
+        var inbox = new KafkaInboxRepository(jdbc);
+        ReflectionTestUtils.setField(inbox, "consumerGroup", "delivery-test");
+        var throttle = new DurableVisitThrottle(jdbc);
+        ReflectionTestUtils.setField(throttle, "throttleSeconds", 300L);
+        if (sessions == null) {
+            sessions = new SessionAggregatorService(jdbc);
+            ReflectionTestUtils.setField(sessions, "configuredSteps", List.of("read_progress"));
+        }
+        var writer = new VisitorLogPersistService(jdbc, mapper,
+                new site.yuqi.analytics.aggregator.governance.EvidenceReceiptWriter(jdbc,
+                        new site.yuqi.analytics.aggregator.governance.GovernancePolicy(true, false, 90, 90, "access-test")));
+        return new KafkaEventBatchProcessor(inbox, throttle, writer, sessions,
+                new JourneyIntentProjectionService(jdbc, mapper),
+                new RollupUpsertService(jdbc, new DurableUniqueSessionCounter(jdbc)));
+    }
+
+    private RawEventEnvelope deliveryEvent(String id, String type, int progress, long offset) {
+        Instant now = Instant.now().minusSeconds(30);
+        Map<String, Object> properties = type.equals("read_progress") ? Map.of("progressPercent", progress) : Map.of();
+        var raw = new RawEvent(id, "access-test", type, now, now, "delivery-session", "delivery-anon",
+                "/work-single/delivery", null, null, "Chrome", "192.0.2.2", null,
+                2, "granted", "hash", properties);
+        var enriched = new EnrichedEvent(id, "access-test", type, now, now, "delivery-session", "delivery-anon",
+                raw.pageUrl(), null, null, "desktop", "Chrome", "macOS", false, 0.0, "hash", null,
+                2, "granted", properties);
+        return new RawEventEnvelope("analytics.raw.events", 0, offset, raw, enriched);
+    }
+
+    @Test
+    void duplicateKafkaDeliveryKeepsAllProgressCheckpointsOnceAndAdminGroupsMaximum() throws Exception {
+        var processor = deliveryProcessor(null);
+        var tx = new TransactionTemplate(new DataSourceTransactionManager(ds));
+        var records = List.of(deliveryEvent("delivery-pv", "page_view", 0, 1),
+                deliveryEvent("delivery-25", "read_progress", 25, 2),
+                deliveryEvent("delivery-75", "read_progress", 75, 3),
+                deliveryEvent("delivery-100", "read_progress", 100, 4));
+        assertThat(tx.<Integer>execute(status -> processor.process(records))).isEqualTo(4);
+        var replay = records.stream().map(r -> new RawEventEnvelope(r.topic(), r.partition(), r.offset() + 100,
+                r.raw(), r.enriched())).toList();
+        assertThat(tx.<Integer>execute(status -> processor.process(replay))).isZero();
+        assertThat(tx.<Integer>execute(status -> processor.process(records))).isZero();
+        assertThat(jdbc.queryForObject("select count(*) from analytics_kafka_inbox", Integer.class)).isEqualTo(4);
+        assertThat(jdbc.queryForObject("select count(*) from behavior_events where session_id='delivery-session'", Integer.class)).isEqualTo(4);
+        assertThat(jdbc.queryForObject("select count(*) from analytics_private.visitor_evidence_receipts where source_event_id like 'delivery-%'", Integer.class)).isEqualTo(4);
+        assertThat(jdbc.queryForList("select (properties->>'progressPercent')::int from behavior_events where event_name='read_progress' order by 1", Integer.class))
+                .containsExactly(25, 75, 100);
+        Long rollupBefore = jdbc.queryForObject("select coalesce(sum(event_count),0) from geo_time_rollups", Long.class);
+        jdbc.execute("delete from analytics_kafka_inbox");
+        assertThat(tx.<Integer>execute(status -> processor.process(replay))).isZero();
+        assertThat(jdbc.queryForObject("select coalesce(sum(event_count),0) from geo_time_rollups", Long.class)).isEqualTo(rollupBefore);
+        http.perform(get("/api/admin/visitor-visits").header("X-Internal-Token", "test-internal-token")
+                        .param("sessionId", "delivery-session"))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.items.length()").value(1))
+                .andExpect(jsonPath("$.items[0].visit.eventCount").value(4))
+                .andExpect(jsonPath("$.items[0].visit.maxProgressPercent").value(100));
+    }
+
+    @Test
+    void failedProjectionRollsBackInboxFactsAndEvidenceSoReplayCanRecover() {
+        var brokenSessions = mock(SessionAggregatorService.class);
+        doThrow(new IllegalStateException("simulated database failure")).when(brokenSessions).processBatch(anyList());
+        var broken = deliveryProcessor(brokenSessions);
+        var tx = new TransactionTemplate(new DataSourceTransactionManager(ds));
+        var event = deliveryEvent("rollback-75", "read_progress", 75, 200);
+        assertThrows(IllegalStateException.class, () -> tx.execute(status -> broken.process(List.of(event))));
+        for (String table : List.of("analytics_kafka_inbox", "behavior_events", "analytics_private.behavior_events_raw")) {
+            assertThat(jdbc.queryForObject("select count(*) from " + table + " where event_id='rollback-75'", Integer.class)).isZero();
+        }
+        assertThat(jdbc.queryForObject("select count(*) from analytics_private.visitor_evidence_receipts where source_event_id='rollback-75'", Integer.class)).isZero();
+        var recovered = deliveryProcessor(null);
+        assertThat(tx.<Integer>execute(status -> recovered.process(List.of(event)))).isEqualTo(1);
+        assertThat(tx.<Integer>execute(status -> recovered.process(List.of(event)))).isZero();
+        assertThat(jdbc.queryForObject("select count(*) from behavior_events where event_id='rollback-75'", Integer.class)).isEqualTo(1);
+    }
+
+    @Test
+    void outboxConflictDoesNotResetAnAlreadyDeliveredEvent() {
+        String sql = "insert into analytics_event_outbox(event_id,partition_key,payload) values ('outbox-retry','access-test',?::jsonb) on conflict(event_id) do nothing";
+        jdbc.update(sql, "{\"eventId\":\"outbox-retry\",\"properties\":{\"progressPercent\":75}}");
+        jdbc.update("update analytics_event_outbox set status='SENT' where event_id='outbox-retry'");
+        assertThat(jdbc.update(sql, "{\"eventId\":\"outbox-retry\",\"properties\":{\"progressPercent\":25}}")).isZero();
+        assertThat(jdbc.queryForObject("select status from analytics_event_outbox where event_id='outbox-retry'", String.class)).isEqualTo("SENT");
+        assertThat(jdbc.queryForObject("select (payload->'properties'->>'progressPercent')::int from analytics_event_outbox where event_id='outbox-retry'", Integer.class)).isEqualTo(75);
     }
 
     @ParameterizedTest

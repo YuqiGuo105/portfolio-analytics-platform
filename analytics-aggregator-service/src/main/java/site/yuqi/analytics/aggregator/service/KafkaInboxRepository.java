@@ -17,17 +17,19 @@ public class KafkaInboxRepository {
 
     /**
      * Claims an event inside the caller's transaction. A committed row means
-     * every database projection for the event committed as well.
+     * every database projection for the event committed as well. The durable
+     * fact key also covers late outbox replay after short-lived inbox cleanup.
      */
     public boolean claim(RawEventEnvelope event) {
         int inserted = jdbc.update("""
                 insert into public.analytics_kafka_inbox
                     (event_id, consumer_group, kafka_topic, kafka_partition, kafka_offset)
-                values (?, ?, ?, ?, ?)
+                select ?, ?, ?, ?, ?
+                where not exists (select 1 from public.behavior_events where event_id = ?)
                 on conflict do nothing
                 """,
                 event.enriched().eventId(), consumerGroup,
-                event.topic(), event.partition(), event.offset());
+                event.topic(), event.partition(), event.offset(), event.enriched().eventId());
         return inserted == 1;
     }
 }
