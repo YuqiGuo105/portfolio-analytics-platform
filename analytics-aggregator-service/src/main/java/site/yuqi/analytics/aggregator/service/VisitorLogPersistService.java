@@ -38,6 +38,10 @@ public class VisitorLogPersistService {
             "contentId", "contentType", "category", "progressPercent", "engagedSeconds",
             "component", "action", "campaign", "experimentId", "variant",
             "recommendationRequestId", "rank", "modelVersion", "resultCount",
+            "mediaId", "mediaVersion", "placement", "playbackId", "playMode",
+            "durationSeconds", "positionSeconds", "watchedSeconds", "coveragePercent", "startupMs",
+            "stallCount", "stallMs", "quality", "chapterIndex", "errorCode", "sequence", "playTrigger",
+            "bitrateKbps", "bandwidthKbps", "downlinkMbps", "effectiveType",
             "botAssessmentProvider", "botAssessmentStatus", "botAssessmentHumanScore",
             "botAssessmentReasons", "botAssessmentVerifiedBot", "botAssessmentVerifiedBotType");
 
@@ -199,7 +203,23 @@ public class VisitorLogPersistService {
                 .filter(entry -> entry.getValue() instanceof String
                         || entry.getValue() instanceof Number
                         || entry.getValue() instanceof Boolean)
+                .filter(entry -> validNetworkProperty(entry.getKey(), entry.getValue()))
                 .collect(java.util.stream.Collectors.toUnmodifiableMap(Map.Entry::getKey, Map.Entry::getValue));
+    }
+
+    private static boolean validNetworkProperty(String key, Object value) {
+        if ("effectiveType".equals(key)) {
+            return value instanceof String text && Set.of("slow-2g", "2g", "3g", "4g").contains(text);
+        }
+        double limit = switch (key) {
+            case "bitrateKbps" -> 100_000;
+            case "bandwidthKbps" -> 1_000_000;
+            case "downlinkMbps" -> 10_000;
+            default -> -1;
+        };
+        if (limit < 0) return true;
+        return value instanceof Number number && Double.isFinite(number.doubleValue())
+                && number.doubleValue() >= 0 && number.doubleValue() <= limit;
     }
 
     private String json(Map<String, Object> value) {
