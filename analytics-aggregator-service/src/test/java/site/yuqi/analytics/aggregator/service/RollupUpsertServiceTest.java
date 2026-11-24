@@ -51,6 +51,18 @@ class RollupUpsertServiceTest {
     }
 
     @Test
+    void uiTelemetryDoesNotInflatePublicCountersOrCreateGeoWrites() {
+        for (String type : List.of("media_start", "media_summary", "widget_opened")) {
+            var event = new EnrichedEvent("media-1", "yuqi.site", type,
+                    Instant.now(), Instant.now(), "session", "anon", "/", null, null,
+                    "desktop", "Chrome", "macOS", false, 0.0, "hash", null);
+            svc.upsert(event);
+            svc.upsertBatch(List.of(event));
+        }
+        org.mockito.Mockito.verifyNoInteractions(jdbc, sessionCounter);
+    }
+
+    @Test
     void writesOneUpsertPerGranularity() {
         Instant ts = Instant.parse("2026-06-23T12:03:00Z");
         svc.upsert(sampleEvent("ev-1", ts));

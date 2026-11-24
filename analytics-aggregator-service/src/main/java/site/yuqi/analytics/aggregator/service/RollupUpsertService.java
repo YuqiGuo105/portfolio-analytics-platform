@@ -63,6 +63,7 @@ public class RollupUpsertService {
     @Transactional
     public void upsert(EnrichedEvent e) {
         Objects.requireNonNull(e, "enriched event must not be null");
+        if (interactionTelemetry(e)) return;
         Instant ts = e.eventTime() == null ? Instant.now() : e.eventTime();
         String sessionKey = resolveSessionKey(e);
         upsertAtGranularity(e, ts, Granularity.FIVE_MIN, sessionKey);
@@ -87,7 +88,7 @@ public class RollupUpsertService {
         Map<RollupKey, long[]> oneDay  = new HashMap<>();
 
         for (EnrichedEvent e : events) {
-            if (e == null) continue;
+            if (e == null || interactionTelemetry(e)) continue;
             Instant ts = e.eventTime() == null ? Instant.now() : e.eventTime();
             String sessionKey = resolveSessionKey(e);
             accumulate(fiveMin, e, Granularity.FIVE_MIN, ts, sessionKey);
@@ -99,6 +100,13 @@ public class RollupUpsertService {
     }
 
     // ---------------------------------------------------------------- helpers
+
+    // UI telemetry is retained in behavior/visitor records, not multiplied into
+    // geographic counters or included in the existing public event total.
+    private static boolean interactionTelemetry(EnrichedEvent e) {
+        return e.eventType() != null
+                && (e.eventType().startsWith("media_") || e.eventType().startsWith("widget_"));
+    }
 
     private void accumulate(Map<RollupKey, long[]> acc,
                             EnrichedEvent e, Granularity g, Instant ts, String sessionKey) {
